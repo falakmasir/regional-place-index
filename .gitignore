@@ -1,0 +1,6 @@
+/work/
+/output/
+/artifacts/
+__pycache__/
+*.pyc
+.venv/

@@ -1,0 +1,157 @@
+{
+  "national_regions": [
+    "alabama",
+    "alaska",
+    "arizona",
+    "arkansas",
+    "california",
+    "colorado",
+    "connecticut",
+    "delaware",
+    "district-of-columbia",
+    "florida",
+    "georgia",
+    "hawaii",
+    "idaho",
+    "illinois",
+    "indiana",
+    "iowa",
+    "kansas",
+    "kentucky",
+    "louisiana",
+    "maine",
+    "maryland",
+    "massachusetts",
+    "michigan",
+    "minnesota",
+    "mississippi",
+    "missouri",
+    "montana",
+    "nebraska",
+    "nevada",
+    "new-hampshire",
+    "new-jersey",
+    "new-mexico",
+    "new-york",
+    "north-carolina",
+    "north-dakota",
+    "ohio",
+    "oklahoma",
+    "oregon",
+    "pennsylvania",
+    "rhode-island",
+    "south-carolina",
+    "south-dakota",
+    "tennessee",
+    "texas",
+    "utah",
+    "vermont",
+    "virginia",
+    "washington",
+    "west-virginia",
+    "wisconsin",
+    "wyoming"
+  ],
+  "regions": {
+    "alabama": "https://download.geofabrik.de/north-america/us/alabama-latest.osm.pbf",
+    "alaska": "https://download.geofabrik.de/north-america/us/alaska-latest.osm.pbf",
+    "arizona": "https://download.geofabrik.de/north-america/us/arizona-latest.osm.pbf",
+    "arkansas": "https://download.geofabrik.de/north-america/us/arkansas-latest.osm.pbf",
+    "california": "https://download.geofabrik.de/north-america/us/california-latest.osm.pbf",
+    "colorado": "https://download.geofabrik.de/north-america/us/colorado-latest.osm.pbf",
+    "connecticut": "https://download.geofabrik.de/north-america/us/connecticut-latest.osm.pbf",
+    "delaware": "https://download.geofabrik.de/north-america/us/delaware-latest.osm.pbf",
+    "district-of-columbia": "https://download.geofabrik.de/north-america/us/district-of-columbia-latest.osm.pbf",
+    "florida": "https://download.geofabrik.de/north-america/us/florida-latest.osm.pbf",
+    "georgia": "https://download.geofabrik.de/north-america/us/georgia-latest.osm.pbf",
+    "hawaii": "https://download.geofabrik.de/north-america/us/hawaii-latest.osm.pbf",
+    "idaho": "https://download.geofabrik.de/north-america/us/idaho-latest.osm.pbf",
+    "illinois": "https://download.geofabrik.de/north-america/us/illinois-latest.osm.pbf",
+    "indiana": "https://download.geofabrik.de/north-america/us/indiana-latest.osm.pbf",
+    "iowa": "https://download.geofabrik.de/north-america/us/iowa-latest.osm.pbf",
+    "kansas": "https://download.geofabrik.de/north-america/us/kansas-latest.osm.pbf",
+    "kentucky": "https://download.geofabrik.de/north-america/us/kentucky-latest.osm.pbf",
+    "louisiana": "https://download.geofabrik.de/north-america/us/louisiana-latest.osm.pbf",
+    "maine": "https://download.geofabrik.de/north-america/us/maine-latest.osm.pbf",
+    "maryland": "https://download.geofabrik.de/north-america/us/maryland-latest.osm.pbf",
+    "massachusetts": "https://download.geofabrik.de/north-america/us/massachusetts-latest.osm.pbf",
+    "michigan": "https://download.geofabrik.de/north-america/us/michigan-latest.osm.pbf",
+    "minnesota": "https://download.geofabrik.de/north-america/us/minnesota-latest.osm.pbf",
+    "mississippi": "https://download.geofabrik.de/north-america/us/mississippi-latest.osm.pbf",
+    "missouri": "https://download.geofabrik.de/north-america/us/missouri-latest.osm.pbf",
+    "montana": "https://download.geofabrik.de/north-america/us/montana-latest.osm.pbf",
+    "nebraska": "https://download.geofabrik.de/north-america/us/nebraska-latest.osm.pbf",
+    "nevada": "https://download.geofabrik.de/north-america/us/nevada-latest.osm.pbf",
+    "new-hampshire": "https://download.geofabrik.de/north-america/us/new-hampshire-latest.osm.pbf",
+    "new-jersey": "https://download.geofabrik.de/north-america/us/new-jersey-latest.osm.pbf",
+    "new-mexico": "https://download.geofabrik.de/north-america/us/new-mexico-latest.osm.pbf",
+    "new-york": "https://download.geofabrik.de/north-america/us/new-york-latest.osm.pbf",
+    "north-carolina": "https://download.geofabrik.de/north-america/us/north-carolina-latest.osm.pbf",
+    "north-dakota": "https://download.geofabrik.de/north-america/us/north-dakota-latest.osm.pbf",
+    "ohio": "https://download.geofabrik.de/north-america/us/ohio-latest.osm.pbf",
+    "oklahoma": "https://download.geofabrik.de/north-america/us/oklahoma-latest.osm.pbf",
+    "oregon": "https://download.geofabrik.de/north-america/us/oregon-latest.osm.pbf",
+    "pennsylvania": "https://download.geofabrik.de/north-america/us/pennsylvania-latest.osm.pbf",
+    "rhode-island": "https://download.geofabrik.de/north-america/us/rhode-island-latest.osm.pbf",
+    "south-carolina": "https://download.geofabrik.de/north-america/us/south-carolina-latest.osm.pbf",
+    "south-dakota": "https://download.geofabrik.de/north-america/us/south-dakota-latest.osm.pbf",
+    "tennessee": "https://download.geofabrik.de/north-america/us/tennessee-latest.osm.pbf",
+    "texas": "https://download.geofabrik.de/north-america/us/texas-latest.osm.pbf",
+    "utah": "https://download.geofabrik.de/north-america/us/utah-latest.osm.pbf",
+    "vermont": "https://download.geofabrik.de/north-america/us/vermont-latest.osm.pbf",
+    "virginia": "https://download.geofabrik.de/north-america/us/virginia-latest.osm.pbf",
+    "washington": "https://download.geofabrik.de/north-america/us/washington-latest.osm.pbf",
+    "west-virginia": "https://download.geofabrik.de/north-america/us/west-virginia-latest.osm.pbf",
+    "wisconsin": "https://download.geofabrik.de/north-america/us/wisconsin-latest.osm.pbf",
+    "wyoming": "https://download.geofabrik.de/north-america/us/wyoming-latest.osm.pbf",
+    "socal": "https://download.geofabrik.de/north-america/us/california/socal-latest.osm.pbf",
+    "norcal": "https://download.geofabrik.de/north-america/us/california/norcal-latest.osm.pbf"
+  },
+  "benchmarks": {
+    "seattle": {
+      "regions": [
+        "washington"
+      ],
+      "bbox": [
+        -122.46,
+        47.48,
+        -122.2,
+        47.75
+      ]
+    },
+    "los-angeles": {
+      "regions": [
+        "socal"
+      ],
+      "bbox": [
+        -118.95,
+        33.65,
+        -117.6,
+        34.85
+      ]
+    },
+    "new-york": {
+      "regions": [
+        "new-york",
+        "new-jersey"
+      ],
+      "bbox": [
+        -74.5,
+        40.35,
+        -73.35,
+        41.35
+      ]
+    },
+    "miami": {
+      "regions": [
+        "florida"
+      ],
+      "bbox": [
+        -80.6,
+        25.4,
+        -80.05,
+        26.4
+      ]
+    }
+  }
+}

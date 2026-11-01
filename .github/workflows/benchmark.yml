@@ -1,0 +1,222 @@
+name: Regional place-index benchmark
+
+on:
+  workflow_dispatch:
+    inputs:
+      benchmark:
+        description: Geographic benchmark (full-regions uses the regions input)
+        type: choice
+        options: [seattle, los-angeles, new-york, miami, all-benchmarks, full-regions]
+        default: seattle
+      regions:
+        description: For full-regions, comma-separated configured regions or all (50 states + DC)
+        type: string
+        default: washington
+      publish_release:
+        description: Publish verified bundles as a public dataset release (default branch only)
+        type: boolean
+        default: false
+  schedule:
+    - cron: '37 9 * * *'
+
+permissions:
+  contents: read
+concurrency:
+  group: regional-place-index
+  cancel-in-progress: false
+
+jobs:
+  plan:
+    if: github.event.repository.private == false && (github.event_name == 'workflow_dispatch' || vars.ENABLE_DAILY_BUILDS == 'true')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    outputs:
+      matrix: ${{ steps.plan.outputs.matrix }}
+      publish: ${{ steps.plan.outputs.publish }}
+      tag: ${{ steps.plan.outputs.tag }}
+      artifact_limit: ${{ steps.plan.outputs.artifact_limit }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: '3.11'
+      - id: plan
+        env:
+          BENCHMARK: ${{ inputs.benchmark || vars.DAILY_BENCHMARK || 'seattle' }}
+          REGIONS: ${{ inputs.regions || vars.DAILY_REGIONS || 'washington' }}
+          PUBLISH: ${{ inputs.publish_release == true || (github.event_name == 'schedule' && vars.PUBLISH_RELEASES == 'true') }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          python - <<'PY'
+          import json, os, sys
+          sys.path.insert(0, 'scripts')
+          from pipeline import plan
+          matrix = plan(os.environ['BENCHMARK'], os.environ['REGIONS'])
+          publish = os.environ['PUBLISH'].lower() == 'true'
+          if publish and os.environ['GITHUB_REF'] != 'refs/heads/' + os.environ['DEFAULT_BRANCH']:
+              raise SystemExit('Release publication requires the reviewed default branch')
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as stream:
+              print('matrix=' + json.dumps(matrix, separators=(',', ':')), file=stream)
+              print('publish=' + str(publish).lower(), file=stream)
+              print('tag=data-' + os.environ['GITHUB_RUN_ID'] + '-' + os.environ['GITHUB_RUN_ATTEMPT'], file=stream)
+              # Aggregate review artifacts <= 200 MB/run, each <= 20 MB. Larger
+              # datasets require Releases, not a national Actions artifact store.
+              print('artifact_limit=' + str(min(20_000_000, 200_000_000 // len(matrix['include']))), file=stream)
+          PY
+
+  prepare-release:
+    needs: plan
+    if: needs.plan.outputs.publish == 'true'
+    permissions:
+      contents: write
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      TAG: ${{ needs.plan.outputs.tag }}
+    steps:
+      - name: Create an unpublished dataset draft
+        run: gh release create "$TAG" --draft --target "$GITHUB_SHA" --title "$TAG" --notes 'OSM-derived regional place indexes. See bundled manifests, checksums, measurements and ODbL notices. Not independently verified business opening status.'
+
+  build:
+    needs: [plan, prepare-release]
+    if: ${{ !cancelled() && needs.plan.result == 'success' && (needs.prepare-release.result == 'success' || needs.prepare-release.result == 'skipped') }}
+    permissions:
+      contents: write
+    runs-on: ubuntu-24.04
+    timeout-minutes: 300
+    strategy:
+      fail-fast: false
+      max-parallel: 2
+      matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
+    env:
+      REGION: ${{ matrix.region }}
+      SCOPE: ${{ matrix.scope }}
+      KEY: ${{ matrix.key }}
+      BBOX: ${{ matrix.bbox }}
+      PYTHONUNBUFFERED: '1'
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: '3.11'
+      - name: Install native filter and pinned geometry tools
+        timeout-minutes: 15
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends osmium-tool
+          python -m pip install -r requirements.txt
+          mkdir -p work artifacts
+          osmium --version > work/tool-versions.txt
+          python -m pip freeze >> work/tool-versions.txt
+      - name: Download and verify one regional extract
+        timeout-minutes: 40
+        run: |
+          python scripts/pipeline.py measure --stage download --metrics work/metrics.json --seconds 2250 -- \
+            python scripts/pipeline.py download --region "$REGION" --work work
+          osmium fileinfo --json work/source.osm.pbf > work/pbf-header.json
+      - name: Native tag filter retaining references
+        timeout-minutes: 46
+        shell: bash
+        run: |
+          mapfile -t selectors < <(python scripts/pipeline.py selectors)
+          python scripts/pipeline.py measure --stage filter --metrics work/metrics.json --seconds 2700 -- \
+            osmium tags-filter work/source.osm.pbf "${selectors[@]}" -o work/filtered.osm.pbf --overwrite
+      - name: Verify retained object references
+        timeout-minutes: 11
+        run: |
+          python scripts/pipeline.py measure --stage references --metrics work/metrics.json --seconds 600 -- \
+            osmium check-refs -r work/filtered.osm.pbf
+          rm work/source.osm.pbf
+      - name: Resolve only filtered geometry and scope records
+        timeout-minutes: 46
+        run: |
+          python scripts/pipeline.py measure --stage geometry --metrics work/metrics.json --seconds 2700 -- \
+            python scripts/pipeline.py export --input work/filtered.osm.pbf --db work/records.sqlite --bbox="$BBOX"
+          rm work/filtered.osm.pbf
+      - name: Build spatial and lexical pages
+        timeout-minutes: 46
+        run: |
+          python scripts/pipeline.py measure --stage indexes --metrics work/metrics.json --seconds 2700 -- \
+            python scripts/pipeline.py index --db work/records.sqlite --output output --source work/source.json --header work/pbf-header.json --scope "$SCOPE"
+      - name: Verify all pages and package derived data only
+        timeout-minutes: 31
+        run: |
+          python scripts/pipeline.py measure --stage package --metrics work/metrics.json --seconds 1800 -- \
+            python scripts/pipeline.py package --output output --bundle "artifacts/${KEY}.tar.gz"
+      - name: Always write compact measurements
+        if: always()
+        run: python scripts/pipeline.py report --work work --output "artifacts/${KEY}-metrics.json"
+      - name: Preserve metrics even when a stage fails
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: measurements-${{ matrix.key }}
+          path: |
+            artifacts/*-metrics.json
+            artifacts/*.tar.gz.json
+            work/tool-versions.txt
+          if-no-files-found: warn
+          retention-days: 7
+      - name: Upload validated bundle into the draft release
+        if: success() && needs.plan.outputs.publish == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ needs.plan.outputs.tag }}
+        run: gh release upload "$TAG" "artifacts/${KEY}.tar.gz" "artifacts/${KEY}.tar.gz.json" "artifacts/${KEY}-metrics.json"
+      - name: Check review artifact allowance
+        if: success() && needs.plan.outputs.publish != 'true'
+        id: review
+        env:
+          LIMIT: ${{ needs.plan.outputs.artifact_limit }}
+        run: |
+          python - <<'PY'
+          import os
+          from pathlib import Path
+          size = Path('artifacts/' + os.environ['KEY'] + '.tar.gz').stat().st_size
+          allowed = size <= int(os.environ['LIMIT'])
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as stream:
+              print('allowed=' + str(allowed).lower(), file=stream)
+          if not allowed:
+              print('::warning::Bundle exceeds review-artifact budget; measurements remain available. Rerun with release publication to download the dataset.')
+          PY
+      - name: Upload a small review bundle
+        if: steps.review.outputs.allowed == 'true'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: dataset-${{ matrix.key }}
+          path: artifacts/*.tar.gz
+          compression-level: 0
+          retention-days: 1
+
+  publish:
+    needs: [plan, build]
+    if: success() && needs.plan.outputs.publish == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      TAG: ${{ needs.plan.outputs.tag }}
+      MATRIX: ${{ needs.plan.outputs.matrix }}
+    steps:
+      - name: Check the complete asset inventory before publishing
+        run: |
+          gh release view "$TAG" --json assets > release-assets.json
+          python - <<'PY'
+          import json, os
+          actual = {a['name'] for a in json.load(open('release-assets.json'))['assets']}
+          expected = {row['key'] + suffix for row in json.loads(os.environ['MATRIX'])['include']
+                      for suffix in ('.tar.gz', '.tar.gz.json', '-metrics.json')}
+          if actual != expected:
+              raise SystemExit('Incomplete or unexpected release asset inventory')
+          PY
+          gh release edit "$TAG" --draft=false

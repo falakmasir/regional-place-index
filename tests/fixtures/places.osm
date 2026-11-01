@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Synthetic geometry tests only; never a published venue dataset. -->
+<osm version="0.6" generator="unit-fixture">
+<node id="1" version="3" lon="-122.35" lat="47.61"><tag k="amenity" v="cafe"/><tag k="name" v="Café Test"/><tag k="alt_name" v="Coffee Test"/><tag k="brand" v="Large Chain"/><tag k="website" v="https://never-fetch.invalid"/></node>
+<node id="2" version="3" lon="-122.35" lat="47.61"><tag k="amenity" v="restaurant"/><tag k="name" v="Closed Test"/><tag k="closed" v="yes"/></node>
+<node id="3" version="3" lon="-122.35" lat="47.61"><tag k="amenity" v="restaurant"/><tag k="name" v="New Test"/><tag k="disused:amenity" v="pub"/></node>
+<node id="4" version="3" lon="-122.35" lat="47.61"><tag k="amenity" v="restaurant"/></node>
+<node id="5" version="3" lon="-122.35" lat="47.61"><tag k="shop" v="supermarket"/><tag k="name" v="Chain Test"/><tag k="brand" v="Large Chain"/></node>
+<node id="6" version="3" lon="-74.0" lat="40.7"><tag k="amenity" v="restaurant"/><tag k="name" v="Outside Test"/></node>
+<node id="100" version="3" lon="-122.4" lat="47.6"></node>
+<node id="101" version="3" lon="-122.38" lat="47.6"></node>
+<node id="102" version="3" lon="-122.38" lat="47.62"></node>
+<node id="103" version="3" lon="-122.39" lat="47.61"></node>
+<node id="104" version="3" lon="-122.4" lat="47.62"></node>
+<node id="200" version="3" lon="-122.36" lat="47.6"></node>
+<node id="201" version="3" lon="-122.34" lat="47.6"></node>
+<node id="202" version="3" lon="-122.34" lat="47.62"></node>
+<node id="203" version="3" lon="-122.36" lat="47.62"></node>
+<node id="210" version="3" lon="-122.355" lat="47.605"></node>
+<node id="211" version="3" lon="-122.345" lat="47.605"></node>
+<node id="212" version="3" lon="-122.345" lat="47.615"></node>
+<node id="213" version="3" lon="-122.355" lat="47.615"></node>
+<way id="1" version="4"><nd ref="100"/><nd ref="101"/><nd ref="102"/><nd ref="103"/><nd ref="104"/><nd ref="100"/><tag k="amenity" v="restaurant"/><tag k="name" v="Concave Test"/></way>
+<way id="200" version="4"><nd ref="200"/><nd ref="201"/><nd ref="202"/><nd ref="203"/><nd ref="200"/></way>
+<way id="201" version="4"><nd ref="210"/><nd ref="211"/><nd ref="212"/><nd ref="213"/><nd ref="210"/></way>
+<relation id="700" version="5"><member type="way" ref="200" role="outer"/><member type="way" ref="201" role="inner"/><tag k="type" v="multipolygon"/><tag k="amenity" v="restaurant"/><tag k="name" v="Courtyard Test"/></relation>
+<relation id="701" version="5"><member type="node" ref="1" role=""/><tag k="type" v="site"/><tag k="amenity" v="restaurant"/><tag k="name" v="Unsupported Test"/></relation>
+</osm>
