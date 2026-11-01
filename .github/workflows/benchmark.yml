@@ -12,6 +12,23 @@ on:
         description: For full-regions, comma-separated configured regions or all (50 states + DC)
         type: string
         default: washington
+      source_mode:
+        description: Reuse = offline retry; update = regional diffs; fresh = explicit download; seed = existing PBF release asset
+        type: choice
+        options: [reuse, update, fresh, seed]
+        default: reuse
+      allow_full_download:
+        description: Explicitly permit a full Geofabrik download on a cache miss or update failure
+        type: boolean
+        default: false
+      seed_release_tag:
+        description: For seed mode only, a release in this repository containing REGION.osm.pbf
+        type: string
+        default: ''
+      seed_sha256:
+        description: For seed mode only, trusted SHA-256 of that existing PBF
+        type: string
+        default: ''
       publish_release:
         description: Publish verified bundles as a public dataset release (default branch only)
         type: boolean
@@ -48,12 +65,25 @@ jobs:
           REGIONS: ${{ inputs.regions || vars.DAILY_REGIONS || 'washington' }}
           PUBLISH: ${{ inputs.publish_release == true || (github.event_name == 'schedule' && vars.PUBLISH_RELEASES == 'true') }}
           DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          SOURCE_MODE: ${{ inputs.source_mode || (github.event_name == 'schedule' && 'update') || 'reuse' }}
+          ALLOW_FULL: ${{ inputs.allow_full_download == true || (github.event_name == 'schedule' && vars.ALLOW_FULL_DOWNLOADS == 'true') }}
+          SEED_TAG: ${{ inputs.seed_release_tag }}
+          SEED_SHA: ${{ inputs.seed_sha256 }}
         run: |
           python - <<'PY'
-          import json, os, sys
+          import json, os, re, sys
           sys.path.insert(0, 'scripts')
           from pipeline import plan
           matrix = plan(os.environ['BENCHMARK'], os.environ['REGIONS'])
+          mode = os.environ['SOURCE_MODE']
+          if mode not in ('reuse', 'update', 'fresh', 'seed'):
+              raise SystemExit('Invalid source mode')
+          if mode == 'fresh' and os.environ['ALLOW_FULL'].lower() != 'true':
+              raise SystemExit('Fresh mode requires explicit allow_full_download=true')
+          if mode == 'seed' and (len(matrix['include']) != 1
+                  or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._/-]{0,119}', os.environ['SEED_TAG'])
+                  or not re.fullmatch(r'[0-9a-f]{64}', os.environ['SEED_SHA'])):
+              raise SystemExit('Seed requires one region, an existing release tag and trusted lowercase SHA-256')
           publish = os.environ['PUBLISH'].lower() == 'true'
           if publish and os.environ['GITHUB_REF'] != 'refs/heads/' + os.environ['DEFAULT_BRANCH']:
               raise SystemExit('Release publication requires the reviewed default branch')
@@ -86,6 +116,7 @@ jobs:
     if: ${{ !cancelled() && needs.plan.result == 'success' && (needs.prepare-release.result == 'success' || needs.prepare-release.result == 'skipped') }}
     permissions:
       contents: write
+      actions: read
     runs-on: ubuntu-24.04
     timeout-minutes: 300
     strategy:
@@ -98,6 +129,8 @@ jobs:
       KEY: ${{ matrix.key }}
       BBOX: ${{ matrix.bbox }}
       PYTHONUNBUFFERED: '1'
+      SOURCE_MODE: ${{ inputs.source_mode || (github.event_name == 'schedule' && 'update') || 'reuse' }}
+      ALLOW_FULL: ${{ inputs.allow_full_download == true || (github.event_name == 'schedule' && vars.ALLOW_FULL_DOWNLOADS == 'true') }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -105,21 +138,93 @@ jobs:
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: '3.11'
+      - name: Restore complete regional PBF checkpoint
+        if: env.SOURCE_MODE == 'reuse' || env.SOURCE_MODE == 'update'
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: |
+            work/source.osm.pbf
+            work/source.json
+          key: regional-pbf-v1-${{ runner.os }}-${{ runner.arch }}-${{ matrix.region }}-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: |
+            regional-pbf-v1-${{ runner.os }}-${{ runner.arch }}-${{ matrix.region }}-
+      - name: Fail closed on a cache miss before installing tools
+        shell: bash
+        run: |
+          mkdir -p work artifacts
+          if [[ ( "$SOURCE_MODE" == 'reuse' || ( "$SOURCE_MODE" == 'update' && "$ALLOW_FULL" != 'true' ) ) && ( ! -s work/source.osm.pbf || ! -s work/source.json ) ]]; then
+            python - <<'PY'
+          import json
+          from pathlib import Path
+          Path('work/cache-state.json').write_text(json.dumps({'status': 'failed', 'result': 'cache_missing', 'full_download_performed': False}))
+          PY
+            echo '::error::No regional checkpoint restored. No Geofabrik download attempted. Import an existing PBF with seed mode, or explicitly authorize one fresh download.'
+            exit 1
+          fi
       - name: Install native filter and pinned geometry tools
         timeout-minutes: 15
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y --no-install-recommends osmium-tool
+          sudo apt-get install -y --no-install-recommends osmium-tool curl
           python -m pip install -r requirements.txt
           mkdir -p work artifacts
           osmium --version > work/tool-versions.txt
           python -m pip freeze >> work/tool-versions.txt
-      - name: Download and verify one regional extract
-        timeout-minutes: 40
+      - name: Fetch an explicitly selected existing seed (not from Geofabrik)
+        timeout-minutes: 15
+        if: env.SOURCE_MODE == 'seed'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          SEED_TAG: ${{ inputs.seed_release_tag }}
+        run: gh release download "$SEED_TAG" --pattern "${REGION}.osm.pbf" --dir seed
+      - name: Prepare source (reuse, diffs or explicit seed)
+        id: source
+        timeout-minutes: 61
+        env:
+          SEED_SHA: ${{ inputs.seed_sha256 }}
+        shell: bash
         run: |
-          python scripts/pipeline.py measure --stage download --metrics work/metrics.json --seconds 2250 -- \
-            python scripts/pipeline.py download --region "$REGION" --work work
-          osmium fileinfo --json work/source.osm.pbf > work/pbf-header.json
+          extra=()
+          if [[ "$ALLOW_FULL" == 'true' ]]; then extra+=(--allow-full-download); fi
+          if [[ "$SOURCE_MODE" == 'seed' ]]; then extra+=(--seed-file "seed/${REGION}.osm.pbf" --seed-sha256 "$SEED_SHA"); fi
+          python scripts/pipeline.py measure --stage source --metrics work/metrics.json --seconds 3600 -- \
+            python scripts/pipeline.py prepare-source --region "$REGION" --work work --mode "$SOURCE_MODE" "${extra[@]}"
+      - name: Save validated base BEFORE filtering or geometry can fail
+        if: steps.source.outputs.cache_ready == 'true' && steps.source.outputs.cache_changed == 'true'
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: |
+            work/source.osm.pbf
+            work/source.json
+          key: regional-pbf-v1-${{ runner.os }}-${{ runner.arch }}-${{ matrix.region }}-${{ github.run_id }}-${{ github.run_attempt }}
+      - name: Confirm the checkpoint is persisted before continuing
+        if: steps.source.outputs.cache_ready == 'true' && steps.source.outputs.cache_changed == 'true'
+        timeout-minutes: 3
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          CACHE_KEY: regional-pbf-v1-${{ runner.os }}-${{ runner.arch }}-${{ matrix.region }}-${{ github.run_id }}-${{ github.run_attempt }}
+        run: |
+          python - <<'PY'
+          import json, os, subprocess, time
+          from pathlib import Path
+          confirmed = False
+          for attempt in range(3):
+              reply = subprocess.run(['gh', 'cache', 'list', '--key', os.environ['CACHE_KEY'], '--ref', os.environ['GITHUB_REF'], '--json', 'key,sizeInBytes', '--limit', '10'], capture_output=True, text=True, timeout=30)
+              if reply.returncode == 0 and any(row['key'] == os.environ['CACHE_KEY'] and row['sizeInBytes'] > 0 for row in json.loads(reply.stdout)):
+                  confirmed = True
+                  break
+              time.sleep(2)
+          path = Path('work/cache-state.json')
+          state = json.loads(path.read_text())
+          state['persistence'] = 'confirmed' if confirmed else 'not_confirmed'
+          path.write_text(json.dumps(state, sort_keys=True) + '\n')
+          if not confirmed:
+              raise SystemExit('Cache persistence not confirmed; stopping before downstream work. Check Actions cache service/quota. Do not authorize another full download blindly.')
+          PY
+      - name: Record the selected checkpoint header
+        run: osmium fileinfo --json work/source.osm.pbf > work/pbf-header.json
       - name: Native tag filter retaining references
         timeout-minutes: 46
         shell: bash
@@ -139,7 +244,7 @@ jobs:
         timeout-minutes: 46
         run: |
           python scripts/pipeline.py measure --stage geometry --metrics work/metrics.json --seconds 2700 -- \
-            python scripts/pipeline.py export --input work/filtered.osm.pbf --db work/records.sqlite --bbox="$BBOX" --relation-audit work/relation-audit.json
+            python scripts/pipeline.py export --input work/filtered.osm.pbf --db work/records.sqlite --bbox="$BBOX" --relation-audit work/relation-audit.json --quarantine-invalid-geometry
           rm work/filtered.osm.pbf
       - name: Build spatial and lexical pages
         timeout-minutes: 46
@@ -164,8 +269,13 @@ jobs:
             artifacts/*.tar.gz.json
             work/tool-versions.txt
             work/relation-audit.json
+            work/geometry-report.json
+            work/cache-state.json
           if-no-files-found: warn
           retention-days: 7
+      - name: Block release publication of quarantined benchmark data
+        if: success() && needs.plan.outputs.publish == 'true'
+        run: python scripts/pipeline.py require-complete-geometry --output output
       - name: Upload validated bundle into the draft release
         if: success() && needs.plan.outputs.publish == 'true'
         env:

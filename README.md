@@ -13,12 +13,16 @@ crawler, chain blacklist, live Overpass queries, or database ingestion hooks.
 2. The **Exporter tests** workflow runs on push. It exercises real libosmium and
    Shapely geometry; hosted CI also checks native reference-preserving filtering.
 3. On the default branch, open **Actions → Regional place-index benchmark → Run
-   workflow**. Select **seattle**, leave release publication **off**, and run.
+   workflow**. Select **seattle**, leave release publication **off**. The default
+   `source_mode=reuse` uses a previously saved Washington base without contacting
+   Geofabrik. With no cache, it stops rather than downloading. For a first seed,
+   use an existing PBF as described below; only if none exists, explicitly select
+   `fresh` and check `allow_full_download` for one initial download.
 4. Review the per-stage job summary and download `measurements-washington-seattle`.
    A successful small build also produces a one-day `dataset-washington-seattle`
    review artifact. The `.tar.gz.json` file reports feature/object counts, stored
    bytes, archive bytes and SHA-256. Record cold/warm runner conditions accurately:
-   this version does not cache raw PBFs.
+   `cache-state.json` records reuse/update/full-download and persistence results.
 5. Test **los-angeles**, **new-york** and **miami**, then **all-benchmarks**. New York
    runs both NY and NJ sources; overlapping OSM IDs are stable and must be deduped
    when joining regional outputs. These are explicit stress-test rectangles, not
@@ -41,7 +45,9 @@ To retain a larger dataset, rerun on the reviewed default branch with
 The workflow creates a **draft** release, uploads verified derived bundles, checks
 that every planned asset exists, and publishes only after **all jobs succeed**.
 A failed run leaves an unpublished draft; inspect/delete abandoned drafts manually.
-No raw PBF or local SQLite scratch database is published.
+No raw PBF or local SQLite scratch database is published by the dataset workflow.
+Release uploads are blocked if benchmark geometry quarantine excluded any features; a partial review
+bundle is not silently promoted as a complete catalog.
 
 Review bundles are limited to 20 MB each and 200 MB aggregate per run and retained
 for one day. Oversized bundles are not uploaded as Actions artifacts: rerun with
@@ -57,13 +63,79 @@ Set `DAILY_BENCHMARK` (default `seattle`), `DAILY_REGIONS` (used only by
 For daily national preparation, use `DAILY_BENCHMARK=full-regions` and
 `DAILY_REGIONS=all` only after benchmarks pass. Schedules are best effort and can
 be disabled after 60 days of repository inactivity; monitor freshness and use
-manual catch-up. There is no claim of a daily national SLA.
+manual catch-up. Schedules use incremental `update` mode; full-download fallback
+is **off** unless `ALLOW_FULL_DOWNLOADS=true` is explicitly set. A missing, stale
+or unusable checkpoint otherwise fails closed. There is no daily national SLA.
+
+## Source checkpoints: retry without downloading Washington again
+
+| Mode | Behavior | Full Geofabrik download |
+| --- | --- | --- |
+| `reuse` (manual default) | Validate and replay the saved snapshot offline | Never, even if the permission checkbox is checked |
+| `update` | Restore the full regional base and apply regional replication diffs | Only with explicit `allow_full_download=true` on a miss/update failure |
+| `fresh` | Replace the base with a checksum-verified snapshot using bounded curl | Requires explicit `allow_full_download=true` |
+| `seed` | Import an existing PBF release asset with an operator-provided SHA-256 | Never |
+
+The cache contains **only** `work/source.osm.pbf` and `work/source.json`. A new,
+validated checkpoint is saved and its cache entry confirmed **before** native
+filtering/geometry, so a later geometry failure does not discard the source.
+A reuse/no-diff run does not upload another identical checkpoint. Restore uses a
+region/OS/architecture prefix: a partial-key hit is valid and is not mistaken for
+`cache-hit=false` meaning “no files.” Hash, size, schema, region, URL, header and
+way-node verification provenance are checked before reuse. Nothing reads a raw
+source out of a derived dataset bundle.
+
+Updates use `pyosmium-up-to-date` on the **complete regional source**, not a
+POI-only subset. HTTPS regional replication URLs are pinned to the configured
+Geofabrik region; there is no planet-diff fallback. Legacy HTTP headers are
+normalized while preserving timestamp/sequence. The original base survives failed,
+partial, backwards, timed-out or reference-invalid updates. The updater has a
+256 MB diff budget, 20-minute timeout and 90-day age guard; no unbounded catch-up.
+A headerless verified base can be replayed offline but not incrementally updated.
+Updated bytes get their own SHA-256 and replication provenance, never an inherited
+snapshot MD5 or a false claim that transformed bytes match the original download.
+
+### Import a base you already have (no new Geofabrik transfer)
+
+If you retained the scraper's **full Washington regional base**, use it—not a
+Seattle filtered extract. In the public data repository, upload that existing
+file as `washington.osm.pbf` to a temporary release (the normal GitHub release
+asset size limit applies). For example, using your own existing local file:
+
+```sh
+shasum -a 256 /path/to/washington.osm.pbf
+gh release create source-seed /path/to/washington.osm.pbf --title 'Temporary source seed' --notes 'Existing OSM regional base; OpenStreetMap contributors, ODbL. See DATA_LICENSE.md.'
+```
+
+Run **seattle**, `source_mode=seed`, `seed_release_tag=source-seed`, and paste the
+trusted lowercase SHA-256 into `seed_sha256`. Leave `allow_full_download` and
+publication **off**. Only that named asset in the same repository is fetched.
+The seed is verified/imported and cached before geometry work. Subsequent retries
+use **reuse**, not seed/fresh. The importer rejects a conflicting regional header,
+history files, wrong hashes and missing way-node dependencies. No asset is uploaded
+or deleted automatically; review/remove your temporary release intentionally.
+Operator-seed SHA-256 is recorded separately from upstream snapshot verification.
+
+Actions caches are **not archival storage**: eviction, quota and branch scoping
+apply. Retry on the same/default branch; a cache on an unrelated branch may not
+be visible. Cache misses never authorize a full download by themselves. The
+combined raw US sources exceed the standard 10 GB cache budget; this is not a
+claim that an entire national cache will fit. Keep a trusted seed if you need
+recovery without another provider transfer. Saving/confirming a cache cannot
+prevent later service eviction or runner loss before the save completes.
+
+When updating the public repository, upload **all revised source files including
+`scripts/source_cache.py` and the hidden workflow**, then start a **new run on
+that updated commit**. “Re-run jobs” on an old revision still executes the old,
+uncached downloader. Previously discarded PBFs cannot be reconstructed from the
+small measurement artifacts.
 
 ## Why these stages differ from a restaurant scraper
 
-1. Stream one Geofabrik extract, verify its published MD5 checksum, record SHA-256
-   and PBF replication/header information. Two download attempts share one total
-   deadline. A changed/latest checksum mismatch is a failure/retry, not accepted data.
+1. Restore and validate a complete cached regional PBF; reuse it offline, or update
+   it using regional diffs. Only explicitly authorized full downloads use curl,
+   verify published MD5 and record SHA-256/header information. Two attempts share
+   one deadline. A changed/latest checksum mismatch is never accepted.
 2. Use native **`osmium tags-filter` with referenced objects retained** before Python
    resolves geometry. This avoids constructing Python objects/areas for the whole
    unfiltered state. Missing nodes used by ways remain a hard failure. A separate
@@ -77,8 +149,10 @@ manual catch-up. There is no claim of a daily national SLA.
    assembler could return only their available rings. Nested relation gaps also
    propagate to affected parents; do not silently publish a partial polygon.
 4. Apply the benchmark rectangle to the final representative point. Nodes, ways
-   and relations keep distinct IDs. Missing selected polygon assemblies fail the
-   build; unsupported non-area relations are counted, not invented as point venues.
+   and relations keep distinct IDs. Missing reference members of supported polygons
+   remain fatal. Unusable areas with complete references can be quarantined by the
+   benchmark, with explicit quality metadata; unsupported non-area relations are
+   counted, not invented as point venues.
 5. Spool records locally into SQLite, then build spatial pages and sorted
    per-partition name/token-prefix postings. This SQLite file is disposable local
    working state, never a cloud database or published import.
@@ -92,8 +166,8 @@ use the export command's `--as-of YYYY-MM-DD` when reproducing a past build.
 
 The supported category allowlist is in `scripts/pipeline.py`; it includes named
 food venues, shops and selected navigation POIs, **not every OSM object, address,
-street or national basemap**. The prototype uses fresh regional snapshots, not
-an incomplete POI-only diff implementation. Reproducible indexes do not imply all
+street or national basemap**. Source replication updates the complete regional
+base, then the derived indexes are rebuilt—not patched with incomplete POI-only diffs. Reproducible indexes do not imply all
 underlying OSM businesses have accurate/current data.
 
 This follows BBBike's published preparation/index-serving pattern. References:
@@ -135,11 +209,11 @@ Each stage records wall time, exit status, sampled process-tree RSS and filesyst
 used/free high-water observations. Sampling is every 250 ms: it can miss short
 peaks and filesystem use includes OS/tools, not just scratch data. Reported
 measurements are not Cloudflare CPU measurements or billed private runner minutes.
-Downloads print received-byte progress about every 15 seconds, and measured
-stages print a resource heartbeat about every 30 seconds so a long stage is not
+Full downloads print native curl transfer progress, and measured stages print a resource heartbeat about every 30 seconds so a long stage is not
 silent. Timing out is distinct from a data-integrity failure.
 
-The measurement artifact includes `relation-audit.json`, even when geometry
+The measurement artifact includes `cache-state.json`, `relation-audit.json` and
+`geometry-report.json`, even when geometry
 export fails later. Missing relation members are diagnostic unless they affect a
 supported polygon candidate. The audit is bound to the filtered file's SHA-256
 and closure date so it cannot be accidentally reused for a different input.
@@ -163,8 +237,8 @@ python3 -m venv .venv
 .venv/bin/python -m unittest discover -s tests -v
 ```
 
-Install `osmium-tool` to include the native filtering test; otherwise that one test
-is explicitly skipped. Geometry tests still use real libosmium/Shapely, including
+Install `osmium-tool` to include native filtering/header-normalization checks;
+otherwise those native checks are explicitly skipped. Geometry tests still use real libosmium/Shapely, including
 concave polygons, holes, typed-ID collisions, closure, chains, scope, corruption,
 page bounds, deterministic bundles, downloads and timeouts. Synthetic fixtures
 are only for tests; do not run them as published regional builds.
@@ -173,3 +247,34 @@ Geofabrik: https://download.geofabrik.de/north-america/us.html
 Osmium: https://osmcode.org/osmium-tool/manual.html
 GitHub limits: https://docs.github.com/en/actions/reference/limits
 See `DATA_LICENSE.md` for OSM/ODbL obligations and `LICENSE` for the original code.
+
+
+## Invalid geometry: strict exports versus benchmark quarantine
+
+libosmium may raise `RuntimeError: invalid area` **before** it produces WKB; Shapely
+cannot repair a geometry that does not exist. The exporter catches that specific
+conversion failure and records the typed source ID, area ID, name and error.
+Unexpected runtime errors are not treated as harmless data defects.
+
+Direct `export` commands are strict by default. The benchmark workflow explicitly
+uses `--quarantine-invalid-geometry`, so valid records can be measured while bad
+areas are excluded. The default maximum is 100 rejected features; exceeding it
+fails the build rather than allowing unlimited data loss. Missing way nodes and
+missing source members of supported polygons remain fatal in both modes.
+
+- Once geometry parsing starts, `geometry-report.json` is saved on success or
+  failure and included with metrics, bound to the filtered-input hash/date.
+- Quarantined IDs are removed from both records and name postings, including any
+  earlier closed-way fallback. No bbox-center or fabricated point is substituted.
+- Valid Shapely repairs are marked; a collapsed polygon is not accepted as a line
+  or point merely because `make_valid` returned something nonempty.
+- `manifest.json` includes `coverage.geometry_complete` and an exclusion count.
+  This describes geometry processing, not a guarantee of exhaustive real-world
+  place coverage. Rejected areas may lie outside the requested benchmark bbox;
+  without usable geometry their relationship to that bbox can be unknown.
+- Review bundles include the report; verification cross-checks its counts and
+  makes sure rejected IDs are absent. Public dataset Release uploads are blocked
+  whenever exclusions exist. Inspect/resolve them before production promotion.
+
+A passed benchmark with quarantine means “valid subset processed and measured,”
+not “every requested place was successfully indexed.”

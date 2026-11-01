@@ -19,6 +19,7 @@ from unittest.mock import patch
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
 import pipeline as p
+import source_cache as c
 
 
 class Rules(unittest.TestCase):
@@ -67,34 +68,317 @@ class Download(unittest.TestCase):
         stream.headers = {"Content-Length": str(len(body))}
         return stream
 
+    @staticmethod
+    def transfer(data):
+        def run(command, **kwargs):
+            assert command[0] == "curl"
+            Path(command[command.index("--output") + 1]).write_bytes(data)
+            return unittest.mock.Mock(stdout=json.dumps({"http_code": 200, "time_total": 1.5, "speed_download": 1234}))
+        return run
+
     def test_checksum_and_source_provenance(self):
         data = b"test download bytes, not a real PBF"
         checksum = hashlib.md5(data).hexdigest().encode() + b"  source.osm.pbf\n"
         opener = unittest.mock.Mock()
-        opener.open.side_effect = [self.reply(checksum), self.reply(data)]
-        with tempfile.TemporaryDirectory() as folder, patch.object(p.urllib.request, "build_opener", return_value=opener):
+        opener.open.return_value = self.reply(checksum)
+        with tempfile.TemporaryDirectory() as folder, patch.object(p.urllib.request, "build_opener", return_value=opener), patch.object(p.subprocess, "run", side_effect=self.transfer(data)) as curl:
             work = Path(folder)
             p.download("washington", work)
             self.assertEqual((work / "source.osm.pbf").read_bytes(), data)
             source = p.load(work / "source.json")
             self.assertTrue(source["checksum_verified"])
             self.assertEqual(source["sha256"], hashlib.sha256(data).hexdigest())
+            self.assertEqual(source["download_transport"], "curl")
+            self.assertIn("--max-filesize", curl.call_args.args[0])
 
     def test_bad_checksum_never_promotes_partial_download(self):
         opener = unittest.mock.Mock()
-        opener.open.side_effect = [self.reply(body) for _ in range(2) for body in (b"0" * 32 + b"  source\n", b"bad")]
-        with tempfile.TemporaryDirectory() as folder, patch.object(p.urllib.request, "build_opener", return_value=opener), patch.object(p.time, "sleep"):
-            with self.assertRaises(ValueError):
-                p.download("washington", Path(folder))
-            self.assertFalse((Path(folder) / "source.osm.pbf").exists())
-            self.assertFalse((Path(folder) / "source.partial").exists())
+        opener.open.side_effect = [self.reply(b"0" * 32 + b"  source\n") for _ in range(2)]
+        with tempfile.TemporaryDirectory() as folder, patch.object(p.urllib.request, "build_opener", return_value=opener), patch.object(p.time, "sleep"), patch.object(p.subprocess, "run", side_effect=self.transfer(b"bad")):
+            work = Path(folder)
+            (work / "source.osm.pbf").write_bytes(b"previous good base")
+            with self.assertRaisesRegex(ValueError, "checksum mismatch"):
+                p.download("washington", work)
+            self.assertEqual((work / "source.osm.pbf").read_bytes(), b"previous good base")
+            self.assertFalse((work / "source.partial").exists())
 
     def test_size_limit(self):
         opener = unittest.mock.Mock()
-        opener.open.side_effect = [self.reply(body) for _ in range(2) for body in (b"0" * 32, b"large")]
-        with tempfile.TemporaryDirectory() as folder, patch.object(p.urllib.request, "build_opener", return_value=opener), patch.object(p.time, "sleep"):
-            with self.assertRaisesRegex(ValueError, "size limit"):
+        opener.open.side_effect = [self.reply(b"0" * 32) for _ in range(2)]
+        with tempfile.TemporaryDirectory() as folder, patch.object(p.urllib.request, "build_opener", return_value=opener), patch.object(p.time, "sleep"), patch.object(p.subprocess, "run", side_effect=self.transfer(b"large")):
+            with self.assertRaisesRegex(ValueError, "size"):
                 p.download("washington", Path(folder), max_bytes=2)
+
+
+class SourceCache(unittest.TestCase):
+    """Real tiny PBF headers and hashes; transports/native checker are isolated."""
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name)
+        self.work = self.root / "work"
+        self.work.mkdir()
+        self.url = p.load(ROOT / "regions.json")["regions"]["washington"]
+        self.replication = self.url.removesuffix("-latest.osm.pbf") + "-updates"
+        self.now = dt.datetime.now(dt.timezone.utc).replace(microsecond=0) - dt.timedelta(hours=1)
+        self.download = unittest.mock.Mock(side_effect=AssertionError("Unexpected full download"))
+        self.native_run, self.native_refs = c.subprocess.run, c.check_way_nodes
+        self.process = self.enterContext(patch.object(c.subprocess, "run", side_effect=AssertionError("Unexpected subprocess/network")))
+        self.refs = self.enterContext(patch.object(c, "check_way_nodes"))
+        self.enterContext(patch.object(p.urllib.request.OpenerDirector, "open", side_effect=AssertionError("Unexpected HTTP request")))
+
+    def pbf(self, path, url=None, sequence=100, timestamp=None, empty_header=False, history=False):
+        import osmium
+        header = osmium.io.Header()
+        header.has_multiple_object_versions = history
+        if not empty_header:
+            header.set("osmosis_replication_base_url", url or self.replication)
+            header.set("osmosis_replication_sequence_number", str(sequence))
+            header.set("osmosis_replication_timestamp", (timestamp or self.now).strftime("%Y-%m-%dT%H:%M:%SZ"))
+        path.unlink(missing_ok=True)
+        with osmium.SimpleWriter(osmium.io.File(str(path), "pbf,history=true" if history else "pbf"), header=header) as writer:
+            writer.add_node(osmium.osm.mutable.Node(id=1, version=1, location=(-122.3, 47.6)))
+        return path
+
+    def seed(self, **kwargs):
+        seed = self.pbf(self.root / "seed.osm.pbf", **kwargs)
+        return c.prepare("washington", self.url, self.work, "seed", full_download=self.download,
+                         seed_file=seed, seed_sha256=c.sha256(seed))
+
+    def prepare(self, mode="reuse", allow=False):
+        return c.prepare("washington", self.url, self.work, mode, allow, full_download=self.download)
+
+    def snapshot(self, region, work):
+        path = self.pbf(work / "source.osm.pbf")
+        p.save(work / "source.json", {"region": region, "url": self.url, "bytes": path.stat().st_size,
+               "sha256": c.sha256(path), "md5": hashlib.md5(path.read_bytes()).hexdigest(), "checksum_verified": True})
+
+    def updater(self, exit_code=0, sequence=101, timestamp=None, output=True):
+        def run(command, **kwargs):
+            self.assertEqual(command[0], "pyosmium-up-to-date")
+            self.assertEqual(command[command.index("--server") + 1], self.replication)
+            self.assertIn("--socket-timeout", command)
+            self.assertEqual(kwargs["timeout"], 1200)
+            if output:
+                self.pbf(Path(command[command.index("--outfile") + 1]), sequence=sequence,
+                         timestamp=timestamp or self.now + dt.timedelta(minutes=1))
+            return unittest.mock.Mock(returncode=exit_code)
+        return run
+
+    def test_reuse_missing_never_downloads_even_when_permission_is_true(self):
+        for allow in (False, True):
+            with self.assertRaisesRegex(c.SourceUnavailable, "Reuse mode never downloads"):
+                self.prepare(allow=allow)
+        self.download.assert_not_called()
+        self.process.assert_not_called()
+        self.assertFalse((self.work / "cache-ready.json").exists())
+        self.assertFalse(p.load(self.work / "cache-state.json")["full_download_performed"])
+
+    def test_seed_then_reuse_is_offline_and_does_not_resave(self):
+        state = self.seed()
+        self.assertTrue(state["cache_changed"])
+        original = (self.work / "source.json").read_bytes()
+        self.refs.reset_mock()
+        state = self.prepare(allow=True)
+        self.assertTrue(state["cache_hit"])
+        self.assertFalse(state["cache_changed"])
+        self.assertEqual(state["result"], "cached_snapshot_reused")
+        self.assertEqual((self.work / "source.json").read_bytes(), original)
+        self.refs.assert_not_called()
+        self.download.assert_not_called()
+        self.process.assert_not_called()
+
+    def test_corrupt_and_wrong_region_caches_fail_closed(self):
+        mutations = [lambda meta: meta.update(region="california"),
+                     lambda meta: meta.update(url=self.url.replace("washington", "california")),
+                     lambda meta: meta.update(sha256="0" * 64),
+                     lambda meta: meta.update(bytes=1),
+                     lambda meta: meta.update(checkpoint_schema=0),
+                     lambda meta: meta.update(replication={}),
+                     lambda meta: meta.pop("way_nodes_verified")]
+        for mutate in mutations:
+            with self.subTest(mutation=mutate):
+                self.seed()
+                meta = p.load(self.work / "source.json")
+                mutate(meta)
+                p.save(self.work / "source.json", meta)
+                with self.assertRaises(c.SourceUnavailable):
+                    self.prepare()
+        self.seed()
+        (self.work / "source.osm.pbf").write_bytes(b"corrupt")
+        with self.assertRaises(c.SourceUnavailable):
+            self.prepare()
+        self.download.assert_not_called()
+        self.process.assert_not_called()
+
+    def test_fresh_requires_explicit_permission(self):
+        with self.assertRaisesRegex(c.SourceUnavailable, "Full downloads are disabled"):
+            self.prepare("fresh")
+        self.download.assert_not_called()
+        self.download.side_effect = self.snapshot
+        result = self.prepare("fresh", allow=True)
+        self.assertTrue(result["cache_changed"])
+        self.assertTrue(result["full_download_performed"])
+        meta, _ = c.validate_checkpoint("washington", self.url, self.work)
+        self.assertEqual(meta["verification"], "snapshot_md5")
+        self.assertTrue(meta["checksum_verified"])
+
+    def test_update_miss_only_downloads_when_explicitly_allowed(self):
+        with self.assertRaisesRegex(c.SourceUnavailable, "Full downloads are disabled"):
+            self.prepare("update")
+        self.download.assert_not_called()
+        self.download.side_effect = self.snapshot
+        self.assertTrue(self.prepare("update", allow=True)["full_download_performed"])
+
+    def test_update_no_changes_can_have_no_outfile(self):
+        self.seed()
+        self.process.side_effect = self.updater(output=False)
+        state = self.prepare("update")
+        self.assertEqual(state["result"], "no_new_diffs")
+        self.assertFalse(state["cache_changed"])
+        self.download.assert_not_called()
+
+    def test_atomic_replication_records_new_bytes_not_original_md5(self):
+        self.download.side_effect = self.snapshot
+        self.prepare("fresh", allow=True)
+        before = p.load(self.work / "source.json")
+        self.download.reset_mock()
+        self.process.side_effect = self.updater()
+        state = self.prepare("update")
+        self.assertEqual(state["result"], "replication_updated")
+        after, header = c.validate_checkpoint("washington", self.url, self.work)
+        self.assertEqual(header["sequence"], 101)
+        self.assertFalse(after["checksum_verified"])
+        self.assertNotIn("md5", after)
+        self.assertEqual(after["verified_snapshot_md5"], before["md5"])
+        self.assertEqual(after["previous_checkpoint_sha256"], before["sha256"])
+        self.assertEqual(after["verification"], "replication_from_verified_checkpoint")
+        self.download.assert_not_called()
+
+    def test_partial_failed_and_backward_updates_preserve_original(self):
+        for updater in (self.updater(exit_code=1), self.updater(exit_code=2),
+                        self.updater(sequence=99), self.updater(timestamp=self.now - dt.timedelta(minutes=1))):
+            with self.subTest(updater=updater):
+                self.seed()
+                before = (self.work / "source.osm.pbf").read_bytes()
+                metadata = (self.work / "source.json").read_bytes()
+                self.process.side_effect = updater
+                with self.assertRaises(c.SourceUnavailable):
+                    self.prepare("update")
+                self.assertEqual((self.work / "source.osm.pbf").read_bytes(), before)
+                self.assertEqual((self.work / "source.json").read_bytes(), metadata)
+                self.assertFalse((self.work / "updated.osm.pbf").exists())
+                self.assertFalse((self.work / "cache-ready.json").exists())
+        self.download.assert_not_called()
+
+    def test_update_timeout_and_bad_references_preserve_original(self):
+        self.seed()
+        original = c.sha256(self.work / "source.osm.pbf")
+        self.process.side_effect = subprocess.TimeoutExpired("updater", 1200)
+        with self.assertRaises(c.SourceUnavailable):
+            self.prepare("update")
+        self.assertEqual(c.sha256(self.work / "source.osm.pbf"), original)
+        self.process.side_effect = self.updater()
+        self.refs.side_effect = subprocess.CalledProcessError(1, "osmium check-refs")
+        with self.assertRaises(c.SourceUnavailable):
+            self.prepare("update")
+        self.assertEqual(c.sha256(self.work / "source.osm.pbf"), original)
+        self.download.assert_not_called()
+
+    def test_explicit_update_fallback_is_reported(self):
+        self.seed()
+        self.process.side_effect = self.updater(exit_code=1)
+        self.download.side_effect = self.snapshot
+        state = self.prepare("update", allow=True)
+        self.assertTrue(state["full_download_performed"])
+        self.assertEqual(state["result"], "fresh_snapshot_downloaded")
+
+    def test_old_and_headerless_seeds_reusable_but_not_incrementally_updated(self):
+        for kwargs in ({"timestamp": self.now - dt.timedelta(days=91)}, {"empty_header": True}):
+            with self.subTest(kwargs=kwargs):
+                self.seed(**kwargs)
+                self.assertEqual(self.prepare()["result"], "cached_snapshot_reused")
+                with self.assertRaises(c.SourceUnavailable):
+                    self.prepare("update")
+        self.process.assert_not_called()
+        self.download.assert_not_called()
+
+    def test_legacy_http_header_normalization_keeps_sequence_and_time(self):
+        self.seed(url=self.replication.replace("https:", "http:") + "/")
+        def run(command, **kwargs):
+            if command[0] == "osmium":
+                self.assertIn("--output-header=osmosis_replication_timestamp!", command)
+                self.assertIn("--output-header=osmosis_replication_sequence_number!", command)
+                self.pbf(Path(command[command.index("-o") + 1]))
+                return unittest.mock.Mock(returncode=0)
+            return self.updater(output=False)(command, **kwargs)
+        self.process.side_effect = run
+        self.assertTrue(self.prepare("update")["cache_changed"])
+        _, header = c.validate_checkpoint("washington", self.url, self.work)
+        self.assertEqual(header["url"], self.replication)
+        self.assertEqual(header["sequence"], 100)
+        self.assertEqual(header["timestamp"], self.now.isoformat())
+        self.assertFalse((self.work / "normalized.osm.pbf").exists())
+
+    def test_wrong_seed_checksum_region_history_and_untrusted_servers_rejected(self):
+        bad_seed = self.pbf(self.root / "bad.osm.pbf")
+        with self.assertRaises(c.SourceUnavailable):
+            c.prepare("washington", self.url, self.work, "seed", seed_file=bad_seed, seed_sha256="0" * 64)
+        for kwargs in ({"url": self.replication.replace("washington", "california")},
+                       {"url": "https://planet.osm.org/replication/hour/"}, {"history": True}):
+            with self.subTest(kwargs=kwargs), self.assertRaises(c.SourceUnavailable):
+                self.seed(**kwargs)
+        self.process.assert_not_called()
+        self.download.assert_not_called()
+
+    def test_update_disk_reserve_blocks_before_network(self):
+        self.seed()
+        with patch.object(c.shutil, "disk_usage", return_value=unittest.mock.Mock(free=1)):
+            with self.assertRaisesRegex(c.SourceUnavailable, "disk reserve"):
+                self.prepare("update")
+        self.process.assert_not_called()
+        self.download.assert_not_called()
+
+    @unittest.skipUnless(shutil.which("osmium"), "native osmium-tool unavailable")
+    def test_native_header_normalization_and_seed_reference_check(self):
+        self.refs.side_effect = self.native_refs
+        def run(command, **kwargs):
+            if command[0] == "osmium":
+                return self.native_run(command, **kwargs)
+            return self.updater(output=False)(command, **kwargs)
+        self.process.side_effect = run
+        self.seed(url=self.replication.replace("https:", "http:") + "/")
+        state = self.prepare("update")
+        self.assertTrue(state["cache_changed"])
+        _, header = c.validate_checkpoint("washington", self.url, self.work)
+        self.assertEqual(header["url"], self.replication)
+        self.assertEqual(header["sequence"], 100)
+        self.assertEqual(header["timestamp"], self.now.isoformat())
+        self.download.assert_not_called()
+
+    def test_prepare_cli_defaults_to_reuse_and_reports_cache(self):
+        self.seed()
+        output = self.root / "github-output.txt"
+        with patch.object(sys, "argv", ["pipeline.py", "prepare-source", "--region", "washington", "--work", str(self.work)]), patch.dict(os.environ, {"GITHUB_OUTPUT": str(output)}):
+            self.assertEqual(p.main(), 0)
+        self.assertEqual(output.read_text(), "cache_changed=false\ncache_ready=true\n")
+        summary = self.root / "summary.json"
+        p.report(self.work, summary)
+        self.assertEqual(p.load(summary)["cache-state"]["result"], "cached_snapshot_reused")
+        self.download.assert_not_called()
+        self.process.assert_not_called()
+
+    def test_workflow_default_and_checkpoint_order(self):
+        workflow = (ROOT / ".github/workflows/benchmark.yml").read_text()
+        self.assertRegex(workflow, r"source_mode:[\s\S]*?default: reuse")
+        self.assertRegex(workflow, r"allow_full_download:[\s\S]*?default: false")
+        save = workflow.index("actions/cache/save@")
+        self.assertLess(save, workflow.index("Native tag filter"))
+        self.assertLess(workflow.index("Confirm the checkpoint is persisted"), workflow.index("Native tag filter"))
+        self.assertLess(workflow.index("Fail closed on a cache miss"), workflow.index("Install native filter"))
+        self.assertIn("steps.source.outputs.cache_changed == 'true'", workflow)
+        self.assertNotIn("outputs.cache-hit", workflow)
+        self.assertIn("work/cache-state.json", workflow)
 
 
 class Export(unittest.TestCase):
@@ -218,6 +502,108 @@ class Export(unittest.TestCase):
         self.assertIn("relation:700", self.records())
 
 
+class GeometryQuality(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.work = Path(self.temp.name)
+        self.source = self.work / "source.osm"
+        self.source.write_text((ROOT / "tests/fixtures/places.osm").read_text().replace('relation id="700"', 'relation id="1330059"'))
+        self.db = self.work / "records.sqlite"
+        self.output = self.work / "output"
+
+    def fail_factory(self, targets, message="invalid area (area_id=2660119)"):
+        import osmium
+        real = osmium.geom.WKBFactory()
+        class Factory:
+            def create_multipolygon(self, area):
+                key = ("way" if area.from_way() else "relation", int(area.orig_id()))
+                if key in targets:
+                    raise RuntimeError(message)
+                return real.create_multipolygon(area)
+        return patch.object(osmium.geom, "WKBFactory", return_value=Factory())
+
+    def index(self):
+        p.save(self.work / "source.json", {"fixture": True})
+        p.save(self.work / "header.json", {"fixture": True})
+        p.build_indexes(self.db, self.output, self.work / "source.json", self.work / "header.json", "fixture")
+
+    def test_strict_invalid_area_persists_typed_diagnostic(self):
+        # Inject the reported library error at the WKB boundary while parsing
+        # real fixture areas; this is not the actual production OSM geometry.
+        with self.fail_factory({("relation", 1330059)}), self.assertRaises(p.InvalidGeometry):
+            p.export_records(self.source, self.db)
+        report = p.load(self.work / "geometry-report.json")
+        self.assertEqual(report["status"], "failed")
+        self.assertEqual(report["rejected_count"], 1)
+        self.assertEqual(report["rejected_features"][0]["id"], "relation:1330059")
+        self.assertEqual(report["rejected_features"][0]["area_id"], 2660119)
+
+    def test_benchmark_continues_but_partial_dataset_cannot_be_promoted(self):
+        with self.fail_factory({("relation", 1330059)}):
+            p.export_records(self.source, self.db, quarantine_invalid_geometry=True)
+        self.index()
+        stats = p.verify(self.output)
+        self.assertEqual(stats["features"], 5)
+        self.assertFalse(stats["geometry_complete"])
+        self.assertEqual(stats["geometry_rejected_count"], 1)
+        with self.assertRaisesRegex(ValueError, "Public release blocked"):
+            p.require_complete_geometry(self.output)
+        p.package(self.output, self.work / "fixture.tar.gz")
+        self.assertFalse(p.load(self.work / "fixture.tar.gz.json")["geometry_complete"])
+        with tarfile.open(self.work / "fixture.tar.gz") as archive:
+            self.assertIn("geometry-report.json", archive.getnames())
+
+    def test_rejected_closed_way_cannot_keep_its_earlier_polygon(self):
+        with self.fail_factory({("way", 1)}):
+            p.export_records(self.source, self.db, quarantine_invalid_geometry=True)
+        with sqlite3.connect(self.db) as db:
+            self.assertIsNone(db.execute("SELECT id FROM features WHERE id='way:1'").fetchone())
+            self.assertIsNone(db.execute("SELECT id FROM names WHERE id='way:1'").fetchone())
+        self.assertEqual(p.load(self.work / "geometry-report.json")["rejected_features"][0]["id"], "way:1")
+
+    def test_unrelated_runtime_errors_are_not_swallowed(self):
+        with self.fail_factory({("relation", 1330059)}, "backend unavailable"), self.assertRaisesRegex(RuntimeError, "backend unavailable"):
+            p.export_records(self.source, self.db, quarantine_invalid_geometry=True)
+        report = p.load(self.work / "geometry-report.json")
+        self.assertEqual(report["status"], "failed")
+        self.assertEqual(report["rejected_count"], 0)
+
+    def test_repair_never_treats_a_collapsed_polygon_as_an_area(self):
+        from shapely import make_valid
+        from shapely.geometry import Polygon
+        collapsed = Polygon([(0,0), (1,0), (2,0), (0,0)])
+        with self.assertRaisesRegex(p.InvalidGeometry, "collapsed"):
+            p.representative_geometry(collapsed, True)
+        bowtie = Polygon([(0,0), (2,2), (0,2), (2,0), (0,0)])
+        point, repaired = p.representative_geometry(bowtie, True)
+        self.assertTrue(repaired)
+        self.assertTrue(make_valid(bowtie).covers(point))
+
+    def test_complete_references_but_unassembled_area_is_reported(self):
+        self.source.write_text(self.source.read_text().replace('</osm>', '<relation id="1330060" version="1"><member type="node" ref="1" role="label"/><tag k="type" v="multipolygon"/><tag k="amenity" v="restaurant"/><tag k="name" v="No rings"/></relation></osm>'))
+        p.export_records(self.source, self.db, quarantine_invalid_geometry=True)
+        report = p.load(self.work / "geometry-report.json")
+        self.assertEqual(report["rejected_count"], 1)
+        self.assertEqual(report["rejected_features"][0]["reason"], "unassembled_relation")
+
+    def test_rejection_budget_stops_mass_data_loss(self):
+        with self.fail_factory({("way", 1), ("relation", 1330059)}), self.assertRaisesRegex(p.InvalidGeometry, "limit exceeded"):
+            p.export_records(self.source, self.db, quarantine_invalid_geometry=True, max_geometry_rejections=1)
+        self.assertEqual(p.load(self.work / "geometry-report.json")["status"], "failed")
+
+    def test_inconsistent_quality_report_is_rejected(self):
+        p.export_records(self.source, self.db)
+        self.index()
+        p.require_complete_geometry(self.output)
+        report = p.load(self.output / "geometry-report.json")
+        report["rejected_count"] = 1
+        report["rejected_features"] = [{"id": "node:1"}]
+        p.save(self.output / "geometry-report.json", report)
+        with self.assertRaisesRegex(ValueError, "Geometry quality"):
+            p.verify(self.output)
+
+
 class RelationAudit(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
@@ -303,12 +689,16 @@ class Workflow(unittest.TestCase):
         for job in workflow["jobs"].values():
             for step in job["steps"]:
                 if "uses" in step:
-                    self.assertRegex(step["uses"], r"^actions/[a-z-]+@[a-f0-9]{40}$")
+                    self.assertRegex(step["uses"], r"^actions/[a-z-]+(?:/[a-z-]+)?@[a-f0-9]{40}$")
         self.assertNotIn("secrets.", path.read_text())
         self.assertNotIn("curl ", path.read_text())
         self.assertIn("osmium check-refs work/filtered.osm.pbf", path.read_text())
         self.assertNotIn("osmium check-refs -r work/filtered.osm.pbf", path.read_text())
         self.assertIn("--relation-audit work/relation-audit.json", path.read_text())
+        self.assertIn("--quarantine-invalid-geometry", path.read_text())
+        self.assertIn("require-complete-geometry --output output", path.read_text())
+        self.assertIn("work/geometry-report.json", path.read_text())
+        self.assertLess(path.read_text().index("require-complete-geometry --output output"), path.read_text().index("gh release upload"))
         self.assertIn("work/relation-audit.json", path.read_text())
         self.assertIn("--draft=false", workflow["jobs"]["publish"]["steps"][0]["run"])
 
