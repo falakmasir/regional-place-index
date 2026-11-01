@@ -218,6 +218,56 @@ class Export(unittest.TestCase):
         self.assertIn("relation:700", self.records())
 
 
+class RelationAudit(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.work = Path(self.temp.name)
+
+    def source(self, relation):
+        source = self.work / "partial.osm"
+        source.write_text((ROOT / "tests/fixtures/places.osm").read_text().replace("</osm>", relation + "</osm>"))
+        return source
+
+    def test_missing_unsupported_site_members_are_diagnostic_not_fatal(self):
+        source = self.source('<relation id="800" version="1"><member type="way" ref="99999" role=""/><tag k="type" v="site"/><tag k="amenity" v="restaurant"/><tag k="name" v="Partial site"/></relation>')
+        report = p.audit_relations(source, self.work / "audit.json")
+        self.assertEqual(report["missing_unique_members"], {"nodes": 0, "ways": 1, "relations": 0})
+        self.assertEqual(report["blocked_polygon_relation_ids"], [])
+        self.assertEqual(report["affected_relations"][0]["id"], 800)
+        p.export_records(source, self.work / "records.sqlite", relation_audit=self.work / "audit.json")
+        stats = p.load(self.work / "export-stats.json")
+        self.assertEqual(stats["features"], 6)
+        self.assertEqual(stats["relation_integrity"]["affected_relation_count"], 1)
+
+    def test_missing_outer_ring_blocks_even_if_another_outer_ring_is_present(self):
+        source = self.source('<relation id="800" version="1"><member type="way" ref="200" role="outer"/><member type="way" ref="99999" role="outer"/><tag k="type" v="multipolygon"/><tag k="amenity" v="restaurant"/><tag k="name" v="Partial polygon"/></relation>')
+        report = p.audit_relations(source, self.work / "audit.json")
+        self.assertEqual(report["blocked_polygon_relation_ids"], [800])
+        with self.assertRaisesRegex(ValueError, "incomplete selected relation"):
+            p.export_records(source, self.work / "records.sqlite")
+        self.assertEqual(p.load(self.work / "export-stats.json")["error"], "incomplete_selected_polygon")
+
+    def test_nested_relation_gap_propagates_to_polygon_parent(self):
+        source = self.source('<relation id="800" version="1"><member type="way" ref="99999" role=""/><tag k="type" v="site"/></relation><relation id="801" version="1"><member type="relation" ref="800" role="outer"/><tag k="type" v="multipolygon"/><tag k="amenity" v="restaurant"/><tag k="name" v="Nested partial"/></relation>')
+        report = p.audit_relations(source, self.work / "audit.json")
+        self.assertEqual(report["affected_relation_count"], 2)
+        self.assertEqual(report["blocked_polygon_relation_ids"], [801])
+
+    def test_stale_audit_is_rejected(self):
+        source = self.source("")
+        p.audit_relations(source, self.work / "audit.json")
+        source.write_text(source.read_text().replace('version="3"', 'version="4"'))
+        with self.assertRaisesRegex(ValueError, "does not match"):
+            p.export_records(source, self.work / "records.sqlite", relation_audit=self.work / "audit.json")
+
+    def test_missing_way_node_remains_fatal(self):
+        import osmium
+        source = self.source('<way id="800" version="1"><nd ref="1"/><nd ref="99999"/><tag k="amenity" v="restaurant"/><tag k="name" v="Broken way"/></way>')
+        with self.assertRaises(osmium.InvalidLocationError):
+            p.export_records(source, self.work / "records.sqlite")
+
+
 class BoundsAndMetrics(unittest.TestCase):
     def test_pages_split_and_oversize_reject(self):
         with tempfile.TemporaryDirectory() as folder:
@@ -256,6 +306,10 @@ class Workflow(unittest.TestCase):
                     self.assertRegex(step["uses"], r"^actions/[a-z-]+@[a-f0-9]{40}$")
         self.assertNotIn("secrets.", path.read_text())
         self.assertNotIn("curl ", path.read_text())
+        self.assertIn("osmium check-refs work/filtered.osm.pbf", path.read_text())
+        self.assertNotIn("osmium check-refs -r work/filtered.osm.pbf", path.read_text())
+        self.assertIn("--relation-audit work/relation-audit.json", path.read_text())
+        self.assertIn("work/relation-audit.json", path.read_text())
         self.assertIn("--draft=false", workflow["jobs"]["publish"]["steps"][0]["run"])
 
 

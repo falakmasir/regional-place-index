@@ -66,10 +66,16 @@ manual catch-up. There is no claim of a daily national SLA.
    deadline. A changed/latest checksum mismatch is a failure/retry, not accepted data.
 2. Use native **`osmium tags-filter` with referenced objects retained** before Python
    resolves geometry. This avoids constructing Python objects/areas for the whole
-   unfiltered state. Check node/way/relation references before deleting the raw file.
+   unfiltered state. Missing nodes used by ways remain a hard failure. A separate
+   relation audit records missing members, their relation IDs/types and whether
+   they affect an indexed polygon. Regional extracts can omit relation members;
+   those gaps do not automatically invalidate unrelated node/way POIs.
 3. Resolve filtered nodes, ways and assembled polygon relations. Representative
    points are on/in source geometry, including polygons with holes—not a bounding-box
    center or a surveyed entrance. Repair invalid geometry explicitly and count it.
+   Incomplete supported polygon relations still stop the build, even if an area
+   assembler could return only their available rings. Nested relation gaps also
+   propagate to affected parents; do not silently publish a partial polygon.
 4. Apply the benchmark rectangle to the final representative point. Nodes, ways
    and relations keep distinct IDs. Missing selected polygon assemblies fail the
    build; unsupported non-area relations are counted, not invented as point venues.
@@ -129,6 +135,15 @@ Each stage records wall time, exit status, sampled process-tree RSS and filesyst
 used/free high-water observations. Sampling is every 250 ms: it can miss short
 peaks and filesystem use includes OS/tools, not just scratch data. Reported
 measurements are not Cloudflare CPU measurements or billed private runner minutes.
+Downloads print received-byte progress about every 15 seconds, and measured
+stages print a resource heartbeat about every 30 seconds so a long stage is not
+silent. Timing out is distinct from a data-integrity failure.
+
+The measurement artifact includes `relation-audit.json`, even when geometry
+export fails later. Missing relation members are diagnostic unless they affect a
+supported polygon candidate. The audit is bound to the filtered file's SHA-256
+and closure date so it cannot be accidentally reused for a different input.
+
 The monitor stops a stage if sampled RSS exceeds 12 GiB or free disk drops below
 1 GiB. Downloads require 2 GB free reserve and have a 3 GB input cap.
 

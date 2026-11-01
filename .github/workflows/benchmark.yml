@@ -127,17 +127,19 @@ jobs:
           mapfile -t selectors < <(python scripts/pipeline.py selectors)
           python scripts/pipeline.py measure --stage filter --metrics work/metrics.json --seconds 2700 -- \
             osmium tags-filter work/source.osm.pbf "${selectors[@]}" -o work/filtered.osm.pbf --overwrite
-      - name: Verify retained object references
-        timeout-minutes: 11
+      - name: Verify way nodes and diagnose relation references
+        timeout-minutes: 16
         run: |
           python scripts/pipeline.py measure --stage references --metrics work/metrics.json --seconds 600 -- \
-            osmium check-refs -r work/filtered.osm.pbf
+            osmium check-refs work/filtered.osm.pbf
+          python scripts/pipeline.py measure --stage relation-audit --metrics work/metrics.json --seconds 300 -- \
+            python scripts/pipeline.py audit-relations --input work/filtered.osm.pbf --output work/relation-audit.json
           rm work/source.osm.pbf
       - name: Resolve only filtered geometry and scope records
         timeout-minutes: 46
         run: |
           python scripts/pipeline.py measure --stage geometry --metrics work/metrics.json --seconds 2700 -- \
-            python scripts/pipeline.py export --input work/filtered.osm.pbf --db work/records.sqlite --bbox="$BBOX"
+            python scripts/pipeline.py export --input work/filtered.osm.pbf --db work/records.sqlite --bbox="$BBOX" --relation-audit work/relation-audit.json
           rm work/filtered.osm.pbf
       - name: Build spatial and lexical pages
         timeout-minutes: 46
@@ -161,6 +163,7 @@ jobs:
             artifacts/*-metrics.json
             artifacts/*.tar.gz.json
             work/tool-versions.txt
+            work/relation-audit.json
           if-no-files-found: warn
           retention-days: 7
       - name: Upload validated bundle into the draft release

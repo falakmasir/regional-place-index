@@ -110,6 +110,8 @@ def download(region, work, max_bytes=3_000_000_000, seconds=2100):
     temporary = work / "source.partial"
     # Two attempts share ONE total deadline, rather than multiplying a 35-minute timeout.
     for attempt in range(2):
+        print(f"Download {region}: starting attempt {attempt + 1}/2", flush=True)
+        next_progress = time.monotonic() + 15
         try:
             with opener.open(urllib.request.Request(url + ".md5", headers=headers), timeout=30) as reply:
                 sidecar = reply.read(4097)
@@ -136,6 +138,10 @@ def download(region, work, max_bytes=3_000_000_000, seconds=2100):
                         output.write(chunk)
                         md5.update(chunk)
                         sha256.update(chunk)
+                        if time.monotonic() >= next_progress:
+                            print(f"Download {region}: received {size / 1_000_000:.1f} MB"
+                                  + (f" of {declared / 1_000_000:.1f} MB" if declared else ""), flush=True)
+                            next_progress = time.monotonic() + 15
             if not size or md5.hexdigest() != match[1].decode().lower():
                 raise ValueError("Source checksum mismatch; latest may have changed")
             temporary.replace(target)
@@ -196,6 +202,17 @@ def supported(tags):
             or tags.get("aeroway") in {"aerodrome", "terminal"})
 
 
+def audit_relations(source, output, as_of=None):
+    from relation_audit import audit
+    result = audit(source, supported=supported, inactive=inactive, as_of=as_of)
+    save(output, result)
+    if result["affected_relation_count"]:
+        print("::warning::Regional relation gaps: " + str(result["missing_unique_members"])
+              + "; supported polygon candidates affected: "
+              + str(len(result["blocked_polygon_relation_ids"])) + ". See relation-audit.json.", flush=True)
+    return result
+
+
 def tile(lon, lat, zoom):
     size = 2 ** zoom
     clipped = max(-85.05112878, min(85.05112878, lat))
@@ -204,13 +221,25 @@ def tile(lon, lat, zoom):
     return f"{zoom}/{x}/{y}"
 
 
-def export_records(source, dbpath, bbox=None, as_of=None):
+def export_records(source, dbpath, bbox=None, as_of=None, relation_audit=None):
     import osmium
     from shapely import from_wkb, make_valid
     from shapely.geometry import LineString, Polygon
 
     dbpath.parent.mkdir(parents=True, exist_ok=True)
     dbpath.unlink(missing_ok=True)
+    today = as_of or dt.datetime.now(dt.timezone.utc).date()
+    if relation_audit:
+        audit = load(relation_audit)
+        if audit["input_sha256"] != digest_file(source) or audit["closure_as_of"] != today.isoformat():
+            raise ValueError("Relation audit does not match input/date")
+    else:
+        audit = audit_relations(source, dbpath.parent / "relation-audit.json", today)
+    integrity = {key: audit[key] for key in ("missing_unique_members", "affected_relation_count", "blocked_polygon_relation_ids")}
+    if audit["blocked_polygon_relation_ids"]:
+        save(dbpath.parent / "export-stats.json", {"closure_as_of": today.isoformat(), "relation_integrity": integrity,
+             "error": "incomplete_selected_polygon"})
+        raise ValueError("Unassembled/incomplete selected relation(s): " + str(audit["blocked_polygon_relation_ids"][:20]))
     db = sqlite3.connect(dbpath)
     db.executescript("""
       CREATE TABLE features(id TEXT PRIMARY KEY, cell TEXT, parent TEXT, data TEXT, page TEXT);
@@ -218,8 +247,8 @@ def export_records(source, dbpath, bbox=None, as_of=None):
       CREATE TABLE relations(id INTEGER PRIMARY KEY, assembled INTEGER NOT NULL);
     """)
     factory = osmium.geom.WKBFactory()
-    stats = {"closed_candidates": 0, "unsupported_relations": 0, "repaired_geometries": 0}
-    today = as_of or dt.datetime.now(dt.timezone.utc).date()
+    stats = {"closed_candidates": 0, "unsupported_relations": 0, "repaired_geometries": 0,
+             "relation_integrity": integrity}
     stats["closure_as_of"] = today.isoformat()
 
     class Handler(osmium.SimpleHandler):
@@ -512,6 +541,7 @@ def measure(stage, metrics, seconds, command):
     started = time.monotonic()
     proc = subprocess.Popen(command, start_new_session=True)
     rss, disk_used, min_free = 0, 0, shutil.disk_usage(".").free
+    next_heartbeat = started + 30
     timed_out = False
     resource_limit = None
     try:
@@ -519,6 +549,10 @@ def measure(stage, metrics, seconds, command):
             rss = max(rss, process_rss(proc.pid))
             disk = shutil.disk_usage(".")
             disk_used, min_free = max(disk_used, disk.used), min(min_free, disk.free)
+            if time.monotonic() >= next_heartbeat:
+                print(f"Stage {stage}: {time.monotonic() - started:.0f}s elapsed; "
+                      f"RSS {rss / 1024**2:.0f} MiB; free disk {disk.free / 1024**3:.1f} GiB", flush=True)
+                next_heartbeat = time.monotonic() + 30
             try:
                 code = proc.wait(timeout=.25)
                 break
@@ -553,7 +587,7 @@ def measure(stage, metrics, seconds, command):
 def report(work, destination):
     result = {"schema": 1, "revision": os.environ.get("GITHUB_SHA", "local"),
               "runner_os": sys.platform, "stages": load(work / "metrics.json") if (work / "metrics.json").exists() else {}}
-    for name in ("source", "export-stats"):
+    for name in ("source", "export-stats", "relation-audit"):
         if (work / (name + ".json")).exists():
             result[name] = load(work / (name + ".json"))
     save(destination, result)
@@ -581,6 +615,7 @@ def main():
     p.add_argument("--db", type=Path, required=True)
     p.add_argument("--bbox", default="")
     p.add_argument("--as-of", help="UTC date for reproducible end_date filtering (YYYY-MM-DD)")
+    p.add_argument("--relation-audit", type=Path)
     p = sub.add_parser("index")
     p.add_argument("--db", type=Path, required=True)
     p.add_argument("--output", type=Path, required=True)
@@ -591,6 +626,9 @@ def main():
     p.add_argument("--output", type=Path, required=True)
     p.add_argument("--bundle", type=Path, required=True)
     p = sub.add_parser("verify")
+    p.add_argument("--output", type=Path, required=True)
+    p = sub.add_parser("audit-relations")
+    p.add_argument("--input", type=Path, required=True)
     p.add_argument("--output", type=Path, required=True)
     sub.add_parser("selectors")
     p = sub.add_parser("measure")
@@ -606,6 +644,8 @@ def main():
         print(encoded(plan(args.benchmark, args.regions)).decode())
     elif args.action == "download":
         download(args.region, args.work)
+    elif args.action == "audit-relations":
+        audit_relations(args.input, args.output)
     elif args.action == "selectors":
         print("\n".join(SELECTORS))
     elif args.action == "export":
@@ -613,7 +653,7 @@ def main():
         if bbox and (len(bbox) != 4 or not all(math.isfinite(n) for n in bbox)
                      or not -180 <= bbox[0] < bbox[2] <= 180 or not -90 <= bbox[1] < bbox[3] <= 90):
             raise ValueError("Expected west,south,east,north bbox (no dateline wrap)")
-        export_records(args.input, args.db, bbox, dt.date.fromisoformat(args.as_of) if args.as_of else None)
+        export_records(args.input, args.db, bbox, dt.date.fromisoformat(args.as_of) if args.as_of else None, args.relation_audit)
     elif args.action == "index":
         build_indexes(args.db, args.output, args.source, args.header, args.scope)
     elif args.action == "package":
