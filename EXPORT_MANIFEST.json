@@ -4,13 +4,13 @@
   ".gitignore": "c8290f6c4ebeb4ce131da570ce886c1df40a2d3b804422bcb31fdbf0c3ee4c99",
   "DATA_LICENSE.md": "023a32fa43790e04f3088ee5f37499f8b94b6660d47437b5e643b7a0eeaeaab7",
   "LICENSE": "349bfda60bdf6660321ff52ecb3e04e71875cb53188cc34bbac28f32ca336db9",
-  "README.md": "8c13a3e01f1427223e39315f9fc11355543182ff298d40d0fd2c90603f560981",
+  "README.md": "407901104bcc3310e964bf1b36a1703e9e2e095e9dea02224376ad47fe69b9d4",
   "regions.json": "a030a36e33071a350e3c11959793bd74eac8febd16116138c01e1f6a20b4beb3",
   "requirements-dev.txt": "4c2355efda0785f076e7f0f6b5d5342ad9eb3c5b1479497024e519353e3b8f5b",
   "requirements.txt": "3e60663bab35db43e9749a6b43cedf9ffde0203bacad9e5a4f18fb3b33131561",
-  "scripts/pipeline.py": "bbc7aa2b16e8960fa6ef6254e21c7509b2cd87c36486c85a66e75f1c56331e1a",
+  "scripts/pipeline.py": "836faf3fc5d6aaae1d8cb650972c574c594fa938bc89db413c62d04c35c73fe0",
   "scripts/relation_audit.py": "9619e3e42b3eca5adc7b75a4d1d36345dfa64c8701fbd73b30ef4637d99ee1da",
   "scripts/source_cache.py": "92eb2786a45a6bf5741c7c2ae314c6501216154b479712ffdc229f5d529cbc0a",
   "tests/fixtures/places.osm": "37cdb913ad5f9a8f4657cedb5a48e03857d048b68a55eb0dd1a6cec9bd8b3930",
-  "tests/test_pipeline.py": "024b361c4a22b792036c19ac25eda0396117d5297b4d183c650cc08aa720ec5e"
+  "tests/test_pipeline.py": "b2e5f826e49afc399cc4e6576148e58b1d593197405363d0974307970ccef148"
 }

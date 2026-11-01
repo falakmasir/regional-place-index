@@ -57,6 +57,43 @@ class Rules(unittest.TestCase):
         self.assertTrue(p.supported({"shop": "supermarket", "brand": "Any Chain"}))
         self.assertFalse(p.supported({"highway": "residential"}))
 
+    def test_food_allowlist_accepts_food_venues_and_retail_only(self):
+        amenities = ("restaurant", "fast_food", "cafe", "bar", "pub", "food_court", "ice_cream", "marketplace")
+        shops = ("bakery", "supermarket", "convenience", "grocery", "greengrocer", "deli",
+                 "butcher", "seafood", "fishmonger", "cheese", "dairy", "farm", "frozen_food",
+                 "health_food", "pasta", "pastry", "confectionery", "chocolate", "coffee", "tea",
+                 "spices", "nuts", "food")
+        self.assertEqual(set(p.AMENITIES), set(amenities))
+        self.assertEqual(set(p.FOOD_SHOPS), set(shops))
+        for key, values in (("amenity", amenities), ("shop", shops)):
+            for value in values:
+                with self.subTest(key=key, value=value):
+                    self.assertTrue(p.supported({key: value, "name": "Any Chain"}))
+        excluded = {"amenity": ("bank", "school", "college", "university", "hospital", "clinic",
+                                "pharmacy", "library", "fuel", "bus_station", "ferry_terminal"),
+                    "shop": ("yes", "clothes", "car", "electronics", "general", "vacant"),
+                    "tourism": ("hotel", "camp_site", "museum"),
+                    "leisure": ("park", "sports_centre"),
+                    "railway": ("station",), "aeroway": ("terminal",)}
+        for key, values in excluded.items():
+            for value in values:
+                with self.subTest(key=key, value=value):
+                    self.assertFalse(p.supported({key: value, "name": "Bakery Cafe Restaurant"}))
+        self.assertFalse(p.supported({"name": "Bakery"}))
+        self.assertTrue(p.supported({"tourism": "hotel", "amenity": "restaurant"}))
+        self.assertTrue(p.supported({"amenity": "fuel", "shop": "convenience"}))
+
+    def test_native_selectors_and_final_eligibility_have_identical_allowlists(self):
+        self.assertEqual(len(p.SELECTORS), 2)
+        parsed = {}
+        for selector in p.SELECTORS:
+            key, values = selector.removeprefix("nwr/").split("=")
+            parsed[key] = values.split(",")
+        self.assertEqual(parsed, {"amenity": list(p.AMENITIES), "shop": list(p.FOOD_SHOPS)})
+        for key, values in parsed.items():
+            for value in values:
+                self.assertTrue(p.supported({key: value}))
+
     def test_source_urls(self):
         for url in ("http://download.geofabrik.de/file", "https://example.org/file",
                     "https://download.geofabrik.de@evil.invalid/x", "https://download.geofabrik.de:444/x"):
@@ -586,6 +623,85 @@ class Export(unittest.TestCase):
         self.assertEqual(records["node:1"]["tags"]["brand"], "Large Chain")
         self.assertTrue(all(x["verification"] == "source_tags_only" for x in records.values()))
         self.assertEqual(p.load(self.work / "export-stats.json")["unsupported_relations"], 1)
+
+    def food_scope_source(self):
+        import xml.etree.ElementTree as ET
+        tree = ET.parse(ROOT / "tests/fixtures/places.osm")
+        osm = tree.getroot()
+        # Native filtering must keep this bank-tagged node as geometry support
+        # for the restaurant polygon, but it must not become a search listing.
+        dependency = osm.find("node[@id='100']")
+        ET.SubElement(dependency, "tag", k="amenity", v="bank")
+        ET.SubElement(dependency, "tag", k="name", v="Dependency Bank")
+        for number, tags in enumerate((
+            {"shop": "bakery"}, {"shop": "convenience"}, {"shop": "greengrocer"},
+            {"amenity": "bank"}, {"amenity": "school"}, {"tourism": "camp_site"},
+            {"shop": "clothes"}, {"leisure": "park"}, {"shop": "bakery", "closed": "yes"},
+        ), 9000):
+            node = ET.SubElement(osm, "node", id=str(number), version="1", lon="-122.35", lat="47.61")
+            for key, value in {"name": "Synthetic Scope " + str(number), **tags}.items():
+                ET.SubElement(node, "tag", k=key, v=value)
+        bank = ET.SubElement(osm, "way", id="9000", version="1")
+        for ref in (200, 201, 202, 203, 200):
+            ET.SubElement(bank, "nd", ref=str(ref))
+        ET.SubElement(bank, "tag", k="amenity", v="bank")
+        ET.SubElement(bank, "tag", k="name", v="Bank Polygon")
+        school = ET.SubElement(osm, "relation", id="9001", version="1")
+        ET.SubElement(school, "member", type="way", ref="200", role="outer")
+        ET.SubElement(school, "member", type="way", ref="201", role="inner")
+        for key, value in {"name": "School Polygon", "amenity": "school", "type": "multipolygon"}.items():
+            ET.SubElement(school, "tag", k=key, v=value)
+        # A non-food polygon with missing geometry must not block a food build.
+        relation = ET.SubElement(osm, "relation", id="9000", version="1")
+        ET.SubElement(relation, "member", type="way", ref="999999", role="outer")
+        for key, value in {"name": "School", "amenity": "school", "type": "multipolygon"}.items():
+            ET.SubElement(relation, "tag", k=key, v=value)
+        osm[:] = sorted(osm, key=lambda e: (("node", "way", "relation").index(e.tag), int(e.attrib["id"])))
+        source = self.work / "food-scope.osm"
+        tree.write(source, encoding="utf-8", xml_declaration=True)
+        return source
+
+    def test_food_scope_removes_nonfood_before_geometry_aliases_and_index(self):
+        p.export_records(self.food_scope_source(), self.db)
+        records = self.records()
+        self.assertEqual(set(records), {"node:1", "node:3", "node:5", "node:6", "way:1",
+                                       "relation:700", "node:9000", "node:9001", "node:9002"})
+        self.assertEqual(p.load(self.work / "geometry-report.json")["rejected_count"], 0)
+        self.assertEqual(p.load(self.work / "export-stats.json")["selection_profile"], "food-v1")
+        with sqlite3.connect(self.db) as db:
+            aliases = {row[0] for row in db.execute("SELECT DISTINCT id FROM names")}
+            self.assertEqual(aliases, set(records))
+        self.index()
+        manifest = p.load(self.output / "manifest.json")
+        self.assertEqual(manifest["selection"], {"profile": "food-v1", "amenity": list(p.AMENITIES), "shop": list(p.FOOD_SHOPS)})
+        self.assertEqual(p.verify(self.output)["features"], 9)
+
+    def test_old_broad_sqlite_cannot_be_relabeled_as_food_only(self):
+        self.seed()
+        with sqlite3.connect(self.db) as db:
+            row = json.loads(db.execute("SELECT data FROM features WHERE id='node:1'").fetchone()[0])
+            row["tags"] = {"amenity": "bank"}
+            db.execute("UPDATE features SET data=? WHERE id='node:1'", (p.encoded(row).decode(),))
+        with self.assertRaisesRegex(ValueError, "Non-food record"):
+            self.index()
+
+    @unittest.skipUnless(shutil.which("osmium"), "native osmium-tool is installed by hosted CI")
+    def test_native_food_filter_retains_geometry_dependency_not_its_bank_listing(self):
+        import osmium
+        target = self.work / "food-scope.osm.pbf"
+        subprocess.run(["osmium", "tags-filter", str(self.food_scope_source()), *p.SELECTORS, "-o", str(target)], check=True)
+        class Dependencies(osmium.SimpleHandler):
+            bank_present = False
+            def node(handler, node):
+                if node.id == 100:
+                    handler.bank_present = node.tags.get("amenity") == "bank"
+        dependencies = Dependencies()
+        dependencies.apply_file(str(target))
+        self.assertTrue(dependencies.bank_present)
+        subprocess.run(["osmium", "check-refs", "-r", str(target)], check=True)
+        p.export_records(target, self.db)
+        self.assertEqual(set(self.records()), {"node:1", "node:3", "node:5", "node:6", "way:1",
+                                              "relation:700", "node:9000", "node:9001", "node:9002"})
 
     def test_representative_point_is_inside_concavity_and_not_hole(self):
         from shapely.geometry import Polygon, Point

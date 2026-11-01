@@ -169,11 +169,46 @@ small measurement artifacts.
 End-date filtering records its UTC `closure_as_of` date in the output statistics;
 use the export command's `--as-of YYYY-MM-DD` when reproducing a past build.
 
-The supported category allowlist is in `scripts/pipeline.py`; it includes named
-food venues, shops and selected navigation POIs, **not every OSM object, address,
-street or national basemap**. Source replication updates the complete regional
-base, then the derived indexes are rebuilt—not patched with incomplete POI-only diffs. Reproducible indexes do not imply all
-underlying OSM businesses have accurate/current data.
+### Food-only eligibility
+
+The allowlists in `scripts/pipeline.py` apply **both at native tag filtering and
+before geometry/alias generation**, not just to the search UI. The index builder
+also rejects an old SQLite input containing non-food records rather than labeling
+it as food-only. New manifests record `selection.profile=food-v1` and both lists.
+
+- Food/drink venues: restaurant, fast food, cafe, bar, pub, food court, ice cream,
+  marketplace (a market can contain food stalls; this is not proof of food stock).
+- Food shops: bakery, supermarket, convenience, grocery, greengrocer, deli,
+  butcher, seafood/fishmonger, cheese, dairy, farm shop, frozen food, health food,
+  pasta, pastry, confectionery, chocolate, coffee, tea, spices, nuts, and food.
+- No blanket `shop=*` or `tourism=*`. Banks, schools, hospitals, pharmacies,
+  clothing shops, parks, campsites, hotels and transport POIs do not qualify on
+  their own. A separately tagged cafe/restaurant inside a school, hotel or station
+  can qualify; the parent place is not automatically included. A gas station must
+  carry an explicit qualifying food/shop tag, rather than qualify as fuel alone.
+- Names that merely contain food-related words are not evidence of eligibility.
+  Chains remain eligible. Existing explicit closure/lifecycle/end-date exclusions
+  and name/geometry requirements still apply. Eligibility is not proof of current
+  food availability, confirmed offers, opening status or permission to post.
+
+Previous Washington/California benchmark artifacts used a broad POI policy.
+Their counts, sizes and exclusions are historical baselines, **not food-only
+results**. Rebuild derived data from the full cached regional PBF using `reuse`
+with full downloads disabled for an explicit no-transfer replay. Do not reuse an
+old filtered PBF/SQLite/index: it carries extra non-food candidates. The local lab
+labels old manifests as legacy broad catalogs; it does not silently claim that
+filtering an old UI reduces its stored dataset.
+
+Food-only filtering should reduce records, alias postings, geometry work and
+bundle bytes. The exact reduction and remaining geometry exclusions must be
+measured, not inferred from old aggregate counts. It does **not** reduce the raw
+regional PBF download/cache footprint or the need to scan that source. Keep the
+20 MB review cap until the smaller output is measured; a 50 MB option is not yet
+necessary merely on the basis of the old broad California bundle.
+
+Source replication updates the complete regional base, then the derived indexes
+are rebuilt—not patched with incomplete POI-only diffs. Reproducible indexes do
+not imply all underlying OSM businesses have accurate/current data.
 
 This follows BBBike's published preparation/index-serving pattern. References:
 [offline conversion and concurrency](https://github.com/severinmenard/bbbike-world/blob/9410d13eed262972909cf92d34a4b7cfa1132d1f/Makefile.osm),

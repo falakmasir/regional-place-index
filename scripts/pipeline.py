@@ -23,16 +23,23 @@ import urllib.request
 
 ROOT = Path(__file__).resolve().parents[1]
 MAX_PAGE = 65536
+# Food-serving venues and food retail only. Keep native selectors and the final
+# eligibility check derived from the same allowlists; reference-only dependencies
+# retained by osmium must never become unrelated searchable POIs.
+SELECTION_PROFILE = "food-v1"
 AMENITIES = (
     "restaurant", "fast_food", "cafe", "bar", "pub", "food_court", "ice_cream",
-    "marketplace", "pharmacy", "hospital", "clinic", "doctors", "dentist", "bank",
-    "library", "school", "college", "university", "post_office", "community_centre",
-    "place_of_worship", "cinema", "theatre", "townhall", "bus_station", "ferry_terminal",
+    "marketplace",
+)
+FOOD_SHOPS = (
+    "bakery", "supermarket", "convenience", "grocery", "greengrocer", "deli",
+    "butcher", "seafood", "fishmonger", "cheese", "dairy", "farm", "frozen_food",
+    "health_food", "pasta", "pastry", "confectionery", "chocolate", "coffee",
+    "tea", "spices", "nuts", "food",
 )
 SELECTORS = [
-    "nwr/amenity=" + ",".join(AMENITIES), "nwr/shop", "nwr/tourism",
-    "nwr/leisure=park,fitness_centre,sports_centre,swimming_pool,stadium",
-    "nwr/railway=station,halt", "nwr/aeroway=aerodrome,terminal",
+    "nwr/amenity=" + ",".join(AMENITIES),
+    "nwr/shop=" + ",".join(FOOD_SHOPS),
 ]
 KINDS = ("amenity", "shop", "tourism", "leisure", "railway", "aeroway")
 
@@ -233,11 +240,7 @@ def inactive(tags, today):
 
 
 def supported(tags):
-    return (tags.get("amenity") in AMENITIES or bool(tags.get("shop"))
-            or bool(tags.get("tourism"))
-            or tags.get("leisure") in {"park", "fitness_centre", "sports_centre", "swimming_pool", "stadium"}
-            or tags.get("railway") in {"station", "halt"}
-            or tags.get("aeroway") in {"aerodrome", "terminal"})
+    return tags.get("amenity") in AMENITIES or tags.get("shop") in FOOD_SHOPS
 
 
 def audit_relations(source, output, as_of=None):
@@ -326,7 +329,8 @@ def export_records(source, dbpath, bbox=None, as_of=None, relation_audit=None,
       CREATE TABLE geometry_rejections(id TEXT PRIMARY KEY, data TEXT NOT NULL);
     """)
     factory = osmium.geom.WKBFactory()
-    stats = {"closed_candidates": 0, "unsupported_relations": 0, "repaired_geometries": 0,
+    stats = {"selection_profile": SELECTION_PROFILE,
+             "closed_candidates": 0, "unsupported_relations": 0, "repaired_geometries": 0,
              "relation_integrity": integrity}
     stats["closure_as_of"] = today.isoformat()
     stats["geometry_input_sha256"] = audit["input_sha256"]
@@ -525,11 +529,17 @@ def build_indexes(dbpath, output, source_info, header_info, scope):
     db.executescript("CREATE INDEX IF NOT EXISTS features_cell ON features(cell,id); CREATE INDEX IF NOT EXISTS names_order ON names(cell,term,id);")
     directories = {"spatial": {}, "names": {}}
     for (cell,) in db.execute("SELECT DISTINCT cell FROM features ORDER BY cell").fetchall():
-        rows = (json.loads(row[0]) for row in db.execute("SELECT data FROM features WHERE cell=? ORDER BY id", (cell,)))
+        def rows():
+            for (raw,) in db.execute("SELECT data FROM features WHERE cell=? ORDER BY id", (cell,)):
+                record = json.loads(raw)
+                if not supported(record.get("tags", {})):
+                    db.close()
+                    raise ValueError("Non-food record in index input; rebuild from cached source: " + record["id"])
+                yield record
         def locate(batch, descriptor):
             db.executemany("UPDATE features SET page=? WHERE id=?",
                            ((descriptor["sha256"], row["id"]) for row in batch))
-        directories["spatial"][cell] = pages(output, "spatial", cell, rows, locate)
+        directories["spatial"][cell] = pages(output, "spatial", cell, rows(), locate)
     db.commit()
     for (cell,) in db.execute("SELECT DISTINCT cell FROM names ORDER BY cell").fetchall():
         def entries():
@@ -556,6 +566,7 @@ def build_indexes(dbpath, output, source_info, header_info, scope):
     db.close()
     manifest = {"schema": 1, "source": load(source_info), "pbf_header": load(header_info),
                 "scope": scope, "feature_count": count, "max_decoded_page_bytes": MAX_PAGE,
+                "selection": {"profile": SELECTION_PROFILE, "amenity": list(AMENITIES), "shop": list(FOOD_SHOPS)},
                 "spatial_zoom": 12, "name_zoom": 8, "roots": roots,
                 "attribution": "© OpenStreetMap contributors", "license": "ODbL-1.0",
                 "exporter_revision": os.environ.get("GITHUB_SHA", "local"),
