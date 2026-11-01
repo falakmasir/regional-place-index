@@ -3,16 +3,20 @@ import datetime as dt
 import gzip
 import hashlib
 import io
+import http.server
 import json
 import os
 from pathlib import Path
 import re
 import shutil
 import sqlite3
+import ssl
 import subprocess
 import sys
 import tarfile
 import tempfile
+import threading
+import time
 import unittest
 from unittest.mock import patch
 
@@ -72,6 +76,8 @@ class Download(unittest.TestCase):
     def transfer(data):
         def run(command, **kwargs):
             assert command[0] == "curl"
+            assert "--location" not in command
+            assert "--disable" == command[1]
             Path(command[command.index("--output") + 1]).write_bytes(data)
             return unittest.mock.Mock(stdout=json.dumps({"http_code": 200, "time_total": 1.5, "speed_download": 1234}))
         return run
@@ -108,6 +114,128 @@ class Download(unittest.TestCase):
         with tempfile.TemporaryDirectory() as folder, patch.object(p.urllib.request, "build_opener", return_value=opener), patch.object(p.time, "sleep"), patch.object(p.subprocess, "run", side_effect=self.transfer(b"large")):
             with self.assertRaisesRegex(ValueError, "size"):
                 p.download("washington", Path(folder), max_bytes=2)
+
+    def test_latest_redirect_is_validated_and_checksum_verified(self):
+        data = b"redirected snapshot bytes"
+        url = p.load(ROOT / "regions.json")["regions"]["washington"]
+        dated = url.replace("latest", "261031")
+        checksum = hashlib.md5(data).hexdigest().encode()
+        opener = unittest.mock.Mock()
+        opener.open.return_value = self.reply(checksum)
+        calls = []
+        final_transfer = self.transfer(data)
+        def run(command, **kwargs):
+            calls.append(command[-1])
+            self.assertNotIn("--location", command)
+            if len(calls) == 1:
+                return unittest.mock.Mock(stdout=json.dumps({"http_code": 302, "redirect_url": dated, "time_total": .1}))
+            return final_transfer(command, **kwargs)
+        with tempfile.TemporaryDirectory() as folder, patch.object(p.urllib.request, "build_opener", return_value=opener), patch.object(p.subprocess, "run", side_effect=run):
+            work = Path(folder)
+            p.download("washington", work)
+            self.assertEqual((work / "source.osm.pbf").read_bytes(), data)
+            meta = p.load(work / "source.json")
+            self.assertTrue(meta["checksum_verified"])
+            self.assertEqual(meta["resolved_url"], dated)
+            self.assertEqual(meta["validated_redirects"], 1)
+            self.assertAlmostEqual(meta["transfer_seconds"], 1.6)
+        self.assertEqual(calls, [url, dated])
+
+    def test_unsafe_redirect_rejected_before_second_connection(self):
+        url = "https://download.geofabrik.de/source.osm.pbf"
+        for target in ("http://download.geofabrik.de/source.osm.pbf", "https://evil.invalid/file",
+                       "https://download.geofabrik.de.evil.invalid/file", "file:///etc/passwd",
+                       "https://download.geofabrik.de:444/file", "https://user:pass@download.geofabrik.de/file"):
+            with self.subTest(target=target), tempfile.TemporaryDirectory() as folder, patch.object(p.subprocess, "run") as run:
+                run.return_value.stdout = json.dumps({"http_code": 302, "redirect_url": target})
+                with self.assertRaisesRegex(ValueError, "Only HTTPS Geofabrik"):
+                    p.curl_download(url, Path(folder) / "partial", 1000, time.monotonic() + 10)
+                run.assert_called_once()
+
+    def test_redirect_limit_and_missing_location(self):
+        url = "https://download.geofabrik.de/source.osm.pbf"
+        with tempfile.TemporaryDirectory() as folder, patch.object(p.subprocess, "run") as run:
+            run.return_value.stdout = json.dumps({"http_code": 302, "redirect_url": url})
+            with self.assertRaisesRegex(ValueError, "redirect limit"):
+                p.curl_download(url, Path(folder) / "partial", 1000, time.monotonic() + 10)
+            self.assertEqual(run.call_count, 6)  # One request + at most five hops.
+            run.reset_mock()
+            run.return_value.stdout = json.dumps({"http_code": 302, "redirect_url": ""})
+            with self.assertRaisesRegex(ValueError, "Location"):
+                p.curl_download(url, Path(folder) / "partial", 1000, time.monotonic() + 10)
+            run.assert_called_once()
+
+    def test_redirects_share_deadline_and_accept_relative_locations(self):
+        url = "https://download.geofabrik.de/source-latest.osm.pbf"
+        with tempfile.TemporaryDirectory() as folder, patch.object(p.subprocess, "run") as run, patch.object(p.time, "monotonic", side_effect=[100, 104]):
+            run.side_effect = [unittest.mock.Mock(stdout=json.dumps({"http_code": 307, "redirect_url": "source-dated.osm.pbf"})),
+                               unittest.mock.Mock(stdout=json.dumps({"http_code": 200}))]
+            result = p.curl_download(url, Path(folder) / "partial", 1000, 110)
+            self.assertEqual(result["resolved_url"], "https://download.geofabrik.de/source-dated.osm.pbf")
+            self.assertEqual([call.args[0][call.args[0].index("--max-time") + 1] for call in run.call_args_list], ["10", "6"])
+        with tempfile.TemporaryDirectory() as folder, patch.object(p.subprocess, "run") as run, patch.object(p.time, "monotonic", side_effect=[100, 111]):
+            run.return_value.stdout = json.dumps({"http_code": 302, "redirect_url": url})
+            with self.assertRaises(TimeoutError):
+                p.curl_download(url, Path(folder) / "partial", 1000, 110)
+            run.assert_called_once()
+
+    @unittest.skipUnless(shutil.which("curl") and shutil.which("openssl"), "curl and openssl required")
+    def test_real_curl_https_redirect_without_external_download(self):
+        """Actual curl + TLS + 302/307 responses, not a mocked curl invocation."""
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            key, cert = root / "key.pem", root / "cert.pem"
+            subprocess.run(["openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes", "-days", "1",
+                            "-keyout", str(key), "-out", str(cert), "-subj", "/CN=127.0.0.1",
+                            "-addext", "subjectAltName=IP:127.0.0.1"], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=10)
+            requested = []
+            data = b"tiny local TLS transport fixture, not geographic data"
+            class Handler(http.server.BaseHTTPRequestHandler):
+                def do_GET(self):
+                    requested.append(self.path)
+                    if self.path == "/latest":
+                        self.send_response(302)
+                        self.send_header("Location", "/dated")
+                        body = b"redirect"
+                    elif self.path == "/unsafe":
+                        self.send_response(307)
+                        self.send_header("Location", "http://127.0.0.1/forbidden")
+                        body = b"unsafe redirect"
+                    else:
+                        self.send_response(200)
+                        body = data
+                    self.send_header("Content-Length", str(len(body)))
+                    self.end_headers()
+                    self.wfile.write(body)
+                def log_message(self, *args):
+                    pass
+            server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+            context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+            context.load_cert_chain(cert, key)
+            server.socket = context.wrap_socket(server.socket, server_side=True)
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            origin = "https://127.0.0.1:" + str(server.server_port)
+            original_policy = p.check_url
+            def policy(url):
+                # Only substitute our ephemeral TLS origin; other URLs retain
+                # the production policy. No external network is contacted.
+                if not url.startswith(origin + "/"):
+                    original_policy(url)
+            try:
+                with patch.object(p, "check_url", side_effect=policy), patch.dict(os.environ, {"CURL_CA_BUNDLE": str(cert), "NO_PROXY": "127.0.0.1", "no_proxy": "127.0.0.1"}):
+                    target = root / "source.partial"
+                    result = p.curl_download(origin + "/latest", target, 1000, time.monotonic() + 10)
+                    self.assertEqual(target.read_bytes(), data)
+                    self.assertEqual(result["validated_redirects"], 1)
+                    self.assertEqual(requested, ["/latest", "/dated"])
+                    with self.assertRaises(ValueError):
+                        p.curl_download(origin + "/unsafe", target, 1000, time.monotonic() + 10)
+                    self.assertEqual(requested, ["/latest", "/dated", "/unsafe"])
+            finally:
+                server.shutdown()
+                server.server_close()
+                thread.join(timeout=5)
 
 
 class SourceCache(unittest.TestCase):
@@ -164,6 +292,52 @@ class SourceCache(unittest.TestCase):
                          timestamp=timestamp or self.now + dt.timedelta(minutes=1))
             return unittest.mock.Mock(returncode=exit_code)
         return run
+
+    def test_default_auto_downloads_on_miss_then_reuses_without_requests(self):
+        self.download.side_effect = self.snapshot
+        cold = c.prepare("washington", self.url, self.work, full_download=self.download)
+        self.assertTrue(cold["cache_changed"])
+        self.assertTrue(cold["full_download_performed"])
+        self.assertEqual(cold["mode"], "auto")
+        self.assertEqual(cold["result"], "fresh_snapshot_downloaded")
+        self.download.assert_called_once_with("washington", self.work)
+        original = (self.work / "source.json").read_bytes()
+        warm = c.prepare("washington", self.url, self.work, full_download=self.download)
+        self.assertEqual(warm["result"], "cached_snapshot_reused")
+        self.assertFalse(warm["cache_changed"])
+        self.assertFalse(warm["full_download_performed"])
+        self.assertEqual((self.work / "source.json").read_bytes(), original)
+        self.download.assert_called_once()
+        self.process.assert_not_called()
+
+    def test_auto_invalid_cache_downloads_replacement(self):
+        self.seed()
+        (self.work / "source.osm.pbf").write_bytes(b"corrupt")
+        self.download.side_effect = self.snapshot
+        state = c.prepare("washington", self.url, self.work, full_download=self.download)
+        self.assertTrue(state["full_download_performed"])
+        self.assertFalse(state["cache_hit"])
+        c.validate_checkpoint("washington", self.url, self.work)
+        self.download.assert_called_once()
+
+    def test_auto_download_permission_can_be_disabled(self):
+        with self.assertRaisesRegex(c.SourceUnavailable, "Full downloads are disabled"):
+            self.prepare("auto", allow=False)
+        self.download.assert_not_called()
+        self.process.assert_not_called()
+
+    def test_cli_default_auto_downloads_once_and_opt_out_blocks_a_miss(self):
+        output = self.root / "github-output.txt"
+        argv = ["pipeline.py", "prepare-source", "--region", "washington", "--work", str(self.work)]
+        with patch.object(sys, "argv", argv + ["--no-full-download"]), patch.object(p, "download", side_effect=self.snapshot) as download:
+            with self.assertRaisesRegex(c.SourceUnavailable, "Full downloads are disabled"):
+                p.main()
+            download.assert_not_called()
+        with patch.object(sys, "argv", argv), patch.dict(os.environ, {"GITHUB_OUTPUT": str(output)}), patch.object(p, "download", side_effect=self.snapshot) as download:
+            self.assertEqual(p.main(), 0)
+            self.assertEqual(output.read_text(), "cache_changed=true\ncache_ready=true\n")
+            self.assertEqual(p.main(), 0)
+            download.assert_called_once_with("washington", self.work)
 
     def test_reuse_missing_never_downloads_even_when_permission_is_true(self):
         for allow in (False, True):
@@ -356,7 +530,7 @@ class SourceCache(unittest.TestCase):
         self.assertEqual(header["timestamp"], self.now.isoformat())
         self.download.assert_not_called()
 
-    def test_prepare_cli_defaults_to_reuse_and_reports_cache(self):
+    def test_prepare_cli_defaults_to_auto_and_reports_cached_replay(self):
         self.seed()
         output = self.root / "github-output.txt"
         with patch.object(sys, "argv", ["pipeline.py", "prepare-source", "--region", "washington", "--work", str(self.work)]), patch.dict(os.environ, {"GITHUB_OUTPUT": str(output)}):
@@ -370,8 +544,8 @@ class SourceCache(unittest.TestCase):
 
     def test_workflow_default_and_checkpoint_order(self):
         workflow = (ROOT / ".github/workflows/benchmark.yml").read_text()
-        self.assertRegex(workflow, r"source_mode:[\s\S]*?default: reuse")
-        self.assertRegex(workflow, r"allow_full_download:[\s\S]*?default: false")
+        self.assertRegex(workflow, r"source_mode:[\s\S]*?default: auto")
+        self.assertRegex(workflow, r"allow_full_download:[\s\S]*?default: true")
         save = workflow.index("actions/cache/save@")
         self.assertLess(save, workflow.index("Native tag filter"))
         self.assertLess(workflow.index("Confirm the checkpoint is persisted"), workflow.index("Native tag filter"))
@@ -379,6 +553,7 @@ class SourceCache(unittest.TestCase):
         self.assertIn("steps.source.outputs.cache_changed == 'true'", workflow)
         self.assertNotIn("outputs.cache-hit", workflow)
         self.assertIn("work/cache-state.json", workflow)
+        self.assertIn("else extra+=(--no-full-download)", workflow)
 
 
 class Export(unittest.TestCase):

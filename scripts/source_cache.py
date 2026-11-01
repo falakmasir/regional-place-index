@@ -1,4 +1,4 @@
-"""Validated regional checkpoints; offline retries never trigger a full download."""
+"""Cache-first regional checkpoints, with cold-download fallback and offline replay."""
 from __future__ import annotations
 
 import datetime as dt
@@ -139,9 +139,9 @@ def update_checkpoint(path, header, url, work):
         raise
 
 
-def prepare(region, url, work, mode='reuse', allow_full_download=False,
+def prepare(region, url, work, mode='auto', allow_full_download=True,
             full_download=None, seed_file=None, seed_sha256=None):
-    if mode not in ('reuse', 'update', 'fresh', 'seed'):
+    if mode not in ('auto', 'reuse', 'update', 'fresh', 'seed'):
         raise ValueError('Unknown source mode')
     parts = urlsplit(url)
     if (parts.scheme != 'https' or parts.hostname != 'download.geofabrik.de'
@@ -159,13 +159,13 @@ def prepare(region, url, work, mode='reuse', allow_full_download=False,
     candidate = normalized = None
     try:
         cached, header, cache_error = None, None, None
-        if mode in ('reuse', 'update'):
+        if mode in ('auto', 'reuse', 'update'):
             try:
                 cached, header = validate_checkpoint(region, url, work)
                 state['cache_hit'] = True
             except (SourceUnavailable, OSError, ValueError, RuntimeError) as exc:
                 cache_error = str(exc)
-        if mode == 'reuse':
+        if mode == 'reuse' or (mode == 'auto' and cached is not None):
             if cached is None:
                 raise SourceUnavailable((cache_error or 'No cache') +
                     '. Reuse mode never downloads. Seed an existing PBF, or explicitly allow one fresh download.')

@@ -99,6 +99,50 @@ def check_url(url):
         raise ValueError("Only HTTPS Geofabrik source URLs are allowed")
 
 
+def curl_download(url, temporary, max_bytes, deadline, max_redirects=5):
+    """Follow bounded redirects manually, validating each URL before connecting.
+
+    Curl's --proto-redir restricts schemes, not hosts. Automatic --location
+    would bypass our host policy; disallowing all redirects breaks Geofabrik's
+    normal latest-to-dated-snapshot response instead.
+    """
+    from urllib.parse import urljoin
+    elapsed = 0.0
+    for redirects in range(max_redirects + 1):
+        check_url(url)
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise TimeoutError("Total download budget exceeded")
+        result = subprocess.run([
+            "curl", "--disable", "--fail",  # Ignore curlrc; do NOT auto-follow.
+            "--proto", "=https", "--proto-redir", "=https",
+            "--connect-timeout", "30", "--max-time", str(max(1, int(remaining))),
+            "--retry", "0", "--max-filesize", str(max_bytes),
+            "--user-agent", "RegionalPlaceIndex/0.1 (offline OSM index builder)",
+            "--output", str(temporary), "--write-out", "%{json}", url,
+        ], stdout=subprocess.PIPE, text=True, check=True, timeout=remaining + 5)
+        transfer = json.loads(result.stdout)
+        elapsed += float(transfer.get("time_total", 0))
+        status = int(transfer["http_code"])
+        if status in (301, 302, 303, 307, 308):
+            location = transfer.get("redirect_url")
+            if not isinstance(location, str) or not location:
+                raise ValueError("Source redirect has no Location target")
+            next_url = urljoin(url, location)
+            check_url(next_url)  # Validate BEFORE issuing another request.
+            if redirects == max_redirects:
+                raise ValueError("Source redirect limit exceeded")
+            temporary.unlink(missing_ok=True)
+            url = next_url
+            print(f"Download: following validated Geofabrik redirect {redirects + 1}/{max_redirects}", flush=True)
+            continue
+        if status != 200:
+            raise ValueError(f"Unexpected download HTTP status: {status}")
+        transfer.update(time_total=elapsed, resolved_url=url, validated_redirects=redirects)
+        return transfer
+    raise AssertionError("Unreachable redirect state")
+
+
 def download(region, work, max_bytes=3_000_000_000, seconds=2100):
     url = load(ROOT / "regions.json")["regions"][region]
     check_url(url)
@@ -120,19 +164,7 @@ def download(region, work, max_bytes=3_000_000_000, seconds=2100):
             remaining = deadline - time.monotonic()
             if remaining <= 0 or shutil.disk_usage(work).free < 2_000_000_000:
                 raise TimeoutError("Download time/disk reserve exhausted")
-            # Match the existing native downloader approach. Curl supplies live
-            # transfer progress; checksum/hash verification is still mandatory.
-            result = subprocess.run([
-                "curl", "--fail", "--location", "--max-redirs", "0",
-                "--proto", "=https", "--proto-redir", "=https",
-                "--connect-timeout", "30", "--max-time", str(max(1, int(remaining))),
-                "--retry", "0", "--max-filesize", str(max_bytes),
-                "--user-agent", headers["User-Agent"], "--output", str(temporary),
-                "--write-out", "%{json}", url,
-            ], stdout=subprocess.PIPE, text=True, check=True, timeout=remaining + 5)
-            transfer = json.loads(result.stdout)
-            if int(transfer["http_code"]) != 200:
-                raise ValueError("Unexpected download HTTP status")
+            transfer = curl_download(url, temporary, max_bytes, deadline)
             md5 = hashlib.md5(usedforsecurity=False)
             sha256 = hashlib.sha256()
             size = 0
@@ -151,7 +183,8 @@ def download(region, work, max_bytes=3_000_000_000, seconds=2100):
             save(work / "source.json", {"region": region, "url": url, "bytes": size,
                  "sha256": sha256.hexdigest(), "md5": md5.hexdigest(), "checksum_verified": True,
                  "download_transport": "curl", "transfer_seconds": transfer.get("time_total"),
-                 "transfer_bytes_per_second": transfer.get("speed_download")})
+                 "transfer_bytes_per_second": transfer.get("speed_download"),
+                 "resolved_url": transfer["resolved_url"], "validated_redirects": transfer["validated_redirects"]})
             return
         except Exception:
             temporary.unlink(missing_ok=True)
@@ -741,8 +774,11 @@ def main():
     p = sub.add_parser("prepare-source")
     p.add_argument("--region", required=True)
     p.add_argument("--work", type=Path, required=True)
-    p.add_argument("--mode", choices=["reuse", "update", "fresh", "seed"], default="reuse")
-    p.add_argument("--allow-full-download", action="store_true")
+    p.add_argument("--mode", choices=["auto", "reuse", "update", "fresh", "seed"], default="auto")
+    p.set_defaults(allow_full_download=True)
+    permission = p.add_mutually_exclusive_group()
+    permission.add_argument("--allow-full-download", action="store_true", dest="allow_full_download")
+    permission.add_argument("--no-full-download", action="store_false", dest="allow_full_download")
     p.add_argument("--seed-file", type=Path)
     p.add_argument("--seed-sha256")
     p = sub.add_parser("export")

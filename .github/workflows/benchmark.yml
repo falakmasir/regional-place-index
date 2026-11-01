@@ -13,14 +13,14 @@ on:
         type: string
         default: washington
       source_mode:
-        description: Reuse = offline retry; update = regional diffs; fresh = explicit download; seed = existing PBF release asset
+        description: Auto = cache or download if missing; reuse = offline only; update = regional diffs; fresh = replace; seed = existing file
         type: choice
-        options: [reuse, update, fresh, seed]
-        default: reuse
+        options: [auto, reuse, update, fresh, seed]
+        default: auto
       allow_full_download:
-        description: Explicitly permit a full Geofabrik download on a cache miss or update failure
+        description: Allow a full download if auto/update has no usable cache; uncheck for cache-only operation
         type: boolean
-        default: false
+        default: true
       seed_release_tag:
         description: For seed mode only, a release in this repository containing REGION.osm.pbf
         type: string
@@ -65,7 +65,7 @@ jobs:
           REGIONS: ${{ inputs.regions || vars.DAILY_REGIONS || 'washington' }}
           PUBLISH: ${{ inputs.publish_release == true || (github.event_name == 'schedule' && vars.PUBLISH_RELEASES == 'true') }}
           DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
-          SOURCE_MODE: ${{ inputs.source_mode || (github.event_name == 'schedule' && 'update') || 'reuse' }}
+          SOURCE_MODE: ${{ inputs.source_mode || (github.event_name == 'schedule' && 'update') || 'auto' }}
           ALLOW_FULL: ${{ inputs.allow_full_download == true || (github.event_name == 'schedule' && vars.ALLOW_FULL_DOWNLOADS == 'true') }}
           SEED_TAG: ${{ inputs.seed_release_tag }}
           SEED_SHA: ${{ inputs.seed_sha256 }}
@@ -76,7 +76,7 @@ jobs:
           from pipeline import plan
           matrix = plan(os.environ['BENCHMARK'], os.environ['REGIONS'])
           mode = os.environ['SOURCE_MODE']
-          if mode not in ('reuse', 'update', 'fresh', 'seed'):
+          if mode not in ('auto', 'reuse', 'update', 'fresh', 'seed'):
               raise SystemExit('Invalid source mode')
           if mode == 'fresh' and os.environ['ALLOW_FULL'].lower() != 'true':
               raise SystemExit('Fresh mode requires explicit allow_full_download=true')
@@ -129,7 +129,7 @@ jobs:
       KEY: ${{ matrix.key }}
       BBOX: ${{ matrix.bbox }}
       PYTHONUNBUFFERED: '1'
-      SOURCE_MODE: ${{ inputs.source_mode || (github.event_name == 'schedule' && 'update') || 'reuse' }}
+      SOURCE_MODE: ${{ inputs.source_mode || (github.event_name == 'schedule' && 'update') || 'auto' }}
       ALLOW_FULL: ${{ inputs.allow_full_download == true || (github.event_name == 'schedule' && vars.ALLOW_FULL_DOWNLOADS == 'true') }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -139,7 +139,7 @@ jobs:
         with:
           python-version: '3.11'
       - name: Restore complete regional PBF checkpoint
-        if: env.SOURCE_MODE == 'reuse' || env.SOURCE_MODE == 'update'
+        if: env.SOURCE_MODE == 'auto' || env.SOURCE_MODE == 'reuse' || env.SOURCE_MODE == 'update'
         uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: |
@@ -152,7 +152,7 @@ jobs:
         shell: bash
         run: |
           mkdir -p work artifacts
-          if [[ ( "$SOURCE_MODE" == 'reuse' || ( "$SOURCE_MODE" == 'update' && "$ALLOW_FULL" != 'true' ) ) && ( ! -s work/source.osm.pbf || ! -s work/source.json ) ]]; then
+          if [[ ( "$SOURCE_MODE" == 'reuse' || ( ( "$SOURCE_MODE" == 'auto' || "$SOURCE_MODE" == 'update' ) && "$ALLOW_FULL" != 'true' ) ) && ( ! -s work/source.osm.pbf || ! -s work/source.json ) ]]; then
             python - <<'PY'
           import json
           from pathlib import Path
@@ -186,7 +186,7 @@ jobs:
         shell: bash
         run: |
           extra=()
-          if [[ "$ALLOW_FULL" == 'true' ]]; then extra+=(--allow-full-download); fi
+          if [[ "$ALLOW_FULL" == 'true' ]]; then extra+=(--allow-full-download); else extra+=(--no-full-download); fi
           if [[ "$SOURCE_MODE" == 'seed' ]]; then extra+=(--seed-file "seed/${REGION}.osm.pbf" --seed-sha256 "$SEED_SHA"); fi
           python scripts/pipeline.py measure --stage source --metrics work/metrics.json --seconds 3600 -- \
             python scripts/pipeline.py prepare-source --region "$REGION" --work work --mode "$SOURCE_MODE" "${extra[@]}"

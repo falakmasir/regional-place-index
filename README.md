@@ -14,10 +14,10 @@ crawler, chain blacklist, live Overpass queries, or database ingestion hooks.
    Shapely geometry; hosted CI also checks native reference-preserving filtering.
 3. On the default branch, open **Actions → Regional place-index benchmark → Run
    workflow**. Select **seattle**, leave release publication **off**. The default
-   `source_mode=reuse` uses a previously saved Washington base without contacting
-   Geofabrik. With no cache, it stops rather than downloading. For a first seed,
-   use an existing PBF as described below; only if none exists, explicitly select
-   `fresh` and check `allow_full_download` for one initial download.
+   `source_mode=auto` uses a valid cached Washington base without contacting
+   Geofabrik. If no usable cache exists, it downloads and verifies the base once,
+   saves it before downstream work, then continues. `allow_full_download` is
+   checked by default; uncheck it only when you want to prohibit cold downloads.
 4. Review the per-stage job summary and download `measurements-washington-seattle`.
    A successful small build also produces a one-day `dataset-washington-seattle`
    review artifact. The `.tar.gz.json` file reports feature/object counts, stored
@@ -71,15 +71,16 @@ or unusable checkpoint otherwise fails closed. There is no daily national SLA.
 
 | Mode | Behavior | Full Geofabrik download |
 | --- | --- | --- |
-| `reuse` (manual default) | Validate and replay the saved snapshot offline | Never, even if the permission checkbox is checked |
-| `update` | Restore the full regional base and apply regional replication diffs | Only with explicit `allow_full_download=true` on a miss/update failure |
-| `fresh` | Replace the base with a checksum-verified snapshot using bounded curl | Requires explicit `allow_full_download=true` |
+| `auto` (manual default) | Reuse a valid cached base; download, verify and cache one if absent/unusable | On a miss, allowed by default; uncheck `allow_full_download` to prohibit it |
+| `reuse` | Validate and replay the saved snapshot offline; fail if absent | Never, even if the permission checkbox is checked |
+| `update` | Restore the full regional base and apply regional replication diffs | If `allow_full_download` is enabled on a miss/update failure |
+| `fresh` | Force replacement of the base with a checksum-verified snapshot using bounded curl | Requires `allow_full_download=true` |
 | `seed` | Import an existing PBF release asset with an operator-provided SHA-256 | Never |
 
 The cache contains **only** `work/source.osm.pbf` and `work/source.json`. A new,
 validated checkpoint is saved and its cache entry confirmed **before** native
 filtering/geometry, so a later geometry failure does not discard the source.
-A reuse/no-diff run does not upload another identical checkpoint. Restore uses a
+A cache-hit `auto`, reuse or no-diff run does not upload another identical checkpoint. Restore uses a
 region/OS/architecture prefix: a partial-key hit is valid and is not mistaken for
 `cache-hit=false` meaning “no files.” Hash, size, schema, region, URL, header and
 way-node verification provenance are checked before reuse. Nothing reads a raw
@@ -115,11 +116,12 @@ use **reuse**, not seed/fresh. The importer rejects a conflicting regional heade
 history files, wrong hashes and missing way-node dependencies. No asset is uploaded
 or deleted automatically; review/remove your temporary release intentionally.
 Operator-seed SHA-256 is recorded separately from upstream snapshot verification.
+This optional import is not required: default `auto` mode can download the first base.
 
 Actions caches are **not archival storage**: eviction, quota and branch scoping
 apply. Retry on the same/default branch; a cache on an unrelated branch may not
-be visible. Cache misses never authorize a full download by themselves. The
-combined raw US sources exceed the standard 10 GB cache budget; this is not a
+be visible. Default `auto` downloads a replacement on a miss; select `reuse` or
+uncheck `allow_full_download` to fail instead. The combined raw US sources exceed the standard 10 GB cache budget; this is not a
 claim that an entire national cache will fit. Keep a trusted seed if you need
 recovery without another provider transfer. Saving/confirming a cache cannot
 prevent later service eviction or runner loss before the save completes.
@@ -133,9 +135,12 @@ small measurement artifacts.
 ## Why these stages differ from a restaurant scraper
 
 1. Restore and validate a complete cached regional PBF; reuse it offline, or update
-   it using regional diffs. Only explicitly authorized full downloads use curl,
-   verify published MD5 and record SHA-256/header information. Two attempts share
-   one deadline. A changed/latest checksum mismatch is never accepted.
+   it using regional diffs. Default `auto` downloads once on a miss; downloads use curl,
+   verify published MD5 and record SHA-256/header information. Redirects are followed
+   manually, at most five hops, checking every target is HTTPS on the approved
+   Geofabrik host **before** connecting. Final resolved URL and redirect count are
+   recorded. Two attempts and all hops share one deadline. A changed/latest checksum
+   mismatch is never accepted.
 2. Use native **`osmium tags-filter` with referenced objects retained** before Python
    resolves geometry. This avoids constructing Python objects/areas for the whole
    unfiltered state. Missing nodes used by ways remain a hard failure. A separate
@@ -240,7 +245,10 @@ python3 -m venv .venv
 Install `osmium-tool` to include native filtering/header-normalization checks;
 otherwise those native checks are explicitly skipped. Geometry tests still use real libosmium/Shapely, including
 concave polygons, holes, typed-ID collisions, closure, chains, scope, corruption,
-page bounds, deterministic bundles, downloads and timeouts. Synthetic fixtures
+page bounds, deterministic bundles, downloads and timeouts. Redirect tests use real
+curl against a temporary local HTTPS server (curl/openssl required), with no
+Geofabrik transfer; security-policy cases also reject unapproved hosts and ports.
+Synthetic fixtures
 are only for tests; do not run them as published regional builds.
 
 Geofabrik: https://download.geofabrik.de/north-america/us.html
