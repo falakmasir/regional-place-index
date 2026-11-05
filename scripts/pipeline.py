@@ -346,7 +346,7 @@ def index_names(db):
 
 
 def export_records(source, dbpath, bbox=None, as_of=None, relation_audit=None,
-                   quarantine_invalid_geometry=False, max_geometry_rejections=100):
+                   quarantine_invalid_geometry=False, max_geometry_rejections=100, allow_empty=False):
     import osmium
     from shapely import from_wkb
     from shapely.errors import GEOSException
@@ -504,7 +504,9 @@ def export_records(source, dbpath, bbox=None, as_of=None, relation_audit=None,
         db.commit()
         stats["features"] = db.execute("SELECT count(*) FROM features").fetchone()[0]
         stats["name_entries"] = db.execute("SELECT count(*) FROM names").fetchone()[0]
-        if not stats["features"]:
+        # A tile may legitimately be empty (for example, a box over water or a state
+        # that does not reach it). The merge job still fails if the merged total is empty.
+        if not stats["features"] and not allow_empty:
             raise ValueError("No features produced; empty builds require investigation")
         completed = True
     finally:
@@ -922,6 +924,7 @@ def main():
     p.add_argument("--relation-audit", type=Path)
     p.add_argument("--quarantine-invalid-geometry", action="store_true", help="Benchmark valid records, report exclusions; not complete coverage")
     p.add_argument("--max-geometry-rejections", type=int, default=100)
+    p.add_argument("--allow-empty", action="store_true", help="Permit an empty tile; the merge step still requires features")
     p = sub.add_parser("merge")
     p.add_argument("--inputs", type=Path, nargs="+", required=True)
     p.add_argument("--output", type=Path, required=True)
@@ -978,7 +981,8 @@ def main():
                      or not -180 <= bbox[0] < bbox[2] <= 180 or not -90 <= bbox[1] < bbox[3] <= 90):
             raise ValueError("Expected west,south,east,north bbox (no dateline wrap)")
         export_records(args.input, args.db, bbox, dt.date.fromisoformat(args.as_of) if args.as_of else None,
-                       args.relation_audit, args.quarantine_invalid_geometry, args.max_geometry_rejections)
+                       args.relation_audit, args.quarantine_invalid_geometry, args.max_geometry_rejections,
+                       args.allow_empty)
     elif args.action == "merge":
         print(encoded(merge_records(args.inputs, args.output)).decode())
     elif args.action == "index":

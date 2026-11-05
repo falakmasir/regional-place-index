@@ -333,7 +333,7 @@ jobs:
         timeout-minutes: 46
         run: |
           python scripts/pipeline.py measure --stage geometry --metrics work/metrics.json --seconds 2700 -- \
-            python scripts/pipeline.py export --input work/filtered.osm.pbf --db work/records.sqlite --bbox="$BBOX" --as-of "$AS_OF" --relation-audit work/relation-audit.json --quarantine-invalid-geometry
+            python scripts/pipeline.py export --input work/filtered.osm.pbf --db work/records.sqlite --bbox="$BBOX" --as-of "$AS_OF" --relation-audit work/relation-audit.json --quarantine-invalid-geometry --allow-empty
           rm work/filtered.osm.pbf
       - name: Hand off tile records for the merge job
         if: success()

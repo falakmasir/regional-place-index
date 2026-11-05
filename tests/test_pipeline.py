@@ -1035,6 +1035,30 @@ class TilesAndMerge(unittest.TestCase):
         self.assertNotIn("node:9101", records)
         self.assertIn("node:9102", records)
 
+    def test_empty_tile_is_allowed_but_empty_full_export_is_not(self):
+        # Box over the Atlantic: no fixture object lies here, like the NJ tile that failed.
+        empty_box = (-73.925, 40.35, -73.35, 40.85)
+        with self.assertRaisesRegex(ValueError, "No features produced"):
+            p.export_records(ROOT / "tests/fixtures/places.osm", self.work / "strict.sqlite", empty_box,
+                             as_of=dt.date(2026, 11, 5))
+        p.export_records(ROOT / "tests/fixtures/places.osm", self.work / "tile.sqlite", empty_box,
+                         as_of=dt.date(2026, 11, 5), allow_empty=True)
+        self.assertEqual(p.load(self.work / "export-stats.json")["export_status"], "success")
+        self.assertEqual(p.load(self.work / "export-stats.json")["features"], 0)
+
+    def test_merge_accepts_an_empty_tile_next_to_a_populated_one(self):
+        populated = self.make_input("populated", self.BOX)
+        empty_dir = self.work / "empty"
+        empty_dir.mkdir()
+        p.export_records(ROOT / "tests/fixtures/places.osm", empty_dir / "records.sqlite", (-73.925, 40.35, -73.35, 40.85),
+                         as_of=dt.date(2026, 11, 5), allow_empty=True)
+        p.save(empty_dir / "source.json", {"sha256": "fixture"})
+        p.save(empty_dir / "pbf-header.json", {"fixture": True})
+        result = p.merge_records([populated, empty_dir], self.work / "merged-with-empty")
+        self.assertEqual(result, {"features": 5, "rejected": 0})
+        counts = {item["name"]: item["export"]["features"] for item in p.load(self.work / "merged-with-empty" / "export-stats.json")["merged_inputs"]}
+        self.assertEqual(counts, {"populated": 5, "empty": 0})
+
     def test_fuel_station_cannot_be_smuggled_into_an_old_database(self):
         dbpath = self.work / "old.sqlite"
         p.export_records(ROOT / "tests/fixtures/places.osm", dbpath, self.BOX, as_of=dt.date(2026, 11, 5))
