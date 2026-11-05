@@ -26,7 +26,7 @@ MAX_PAGE = 65536
 # Food-serving venues and food retail only. Keep native selectors and the final
 # eligibility check derived from the same allowlists; reference-only dependencies
 # retained by osmium must never become unrelated searchable POIs.
-SELECTION_PROFILE = "food-v1"
+SELECTION_PROFILE = "food-v2"
 AMENITIES = (
     "restaurant", "fast_food", "cafe", "bar", "pub", "food_court", "ice_cream",
     "marketplace",
@@ -68,6 +68,20 @@ def digest_file(path):
     return digest.hexdigest()
 
 
+def tile_boxes(bbox, columns, rows):
+    """Split a west,south,east,north box into a columns x rows grid.
+
+    Edges are shared between neighbours on purpose: the export filter is
+    inclusive, so objects on a shared edge are emitted by both tiles and the
+    merge step removes the duplicate by typed OSM id.
+    """
+    west, south, east, north = bbox
+    xs = [round(west + (east - west) * i / columns, 6) for i in range(columns)] + [east]
+    ys = [round(south + (north - south) * j / rows, 6) for j in range(rows)] + [north]
+    return [(index, [xs[i], ys[j], xs[i + 1], ys[j + 1]])
+            for index, (i, j) in enumerate((i, j) for i in range(columns) for j in range(rows))]
+
+
 def plan(benchmark, regions):
     config = load(ROOT / "regions.json")
     jobs = []
@@ -75,20 +89,32 @@ def plan(benchmark, regions):
         selected = config["national_regions"] if regions == "all" else regions.split(",")
         if not selected or len(selected) != len(set(selected)):
             raise ValueError("Choose distinct configured regions")
-        targets = [(region.strip(), "full", None) for region in selected]
+        targets = [(region.strip(), "full", None, None) for region in selected]
     else:
         selected = list(config["benchmarks"]) if benchmark == "all-benchmarks" else [benchmark]
         targets = []
         for name in selected:
             spec = config["benchmarks"][name]
-            targets.extend((region, name, spec["bbox"]) for region in spec["regions"])
-    for region, scope, bbox in targets:
+            tiles = spec.get("tiles")
+            if tiles is not None and (len(tiles) != 2 or not all(isinstance(n, int) and 1 <= n <= 10 for n in tiles)):
+                raise ValueError("Tiles must be [columns, rows] between 1 and 10")
+            for region in spec["regions"]:
+                if tiles is None:
+                    targets.append((region, name, spec["bbox"], None))
+                else:
+                    targets.extend((region, name, box, index) for index, box in tile_boxes(spec["bbox"], *tiles))
+    for region, scope, bbox, tile in targets:
         if region not in config["regions"] or not re.fullmatch(r"[a-z]+(?:-[a-z]+)*", region):
             raise ValueError("Unknown region: " + region)
-        jobs.append({"region": region, "scope": scope, "key": region + "-" + scope,
+        key = region + "-" + scope + ("" if tile is None else "-t%d" % tile)
+        # Full-regions outputs are independent; benchmark jobs join their group.
+        group = scope if scope != "full" else key
+        jobs.append({"region": region, "scope": scope, "group": group, "key": key,
                      "bbox": ",".join(map(str, bbox)) if bbox else ""})
     if not jobs or len(jobs) > 100:
         raise ValueError("Invalid matrix size")
+    if len({job["key"] for job in jobs}) != len(jobs):
+        raise ValueError("Duplicate job key")
     return {"include": jobs}
 
 
@@ -240,6 +266,10 @@ def inactive(tags, today):
 
 
 def supported(tags):
+    # Fuel stations are excluded even when they also carry shop=convenience: a
+    # gas-station kiosk is not a food venue for this index.
+    if tags.get("amenity") == "fuel":
+        return False
     return tags.get("amenity") in AMENITIES or tags.get("shop") in FOOD_SHOPS
 
 
@@ -296,6 +326,25 @@ def representative_geometry(geom, polygon):
     return point, repaired
 
 
+def create_records_schema(db):
+    db.executescript("""
+      CREATE TABLE features(id TEXT PRIMARY KEY, cell TEXT, parent TEXT, data TEXT, page TEXT);
+      CREATE TABLE names(cell TEXT, term TEXT, id TEXT, PRIMARY KEY(cell,term,id));
+      CREATE TABLE relations(id INTEGER PRIMARY KEY, assembled INTEGER NOT NULL);
+      CREATE TABLE geometry_rejections(id TEXT PRIMARY KEY, data TEXT NOT NULL);
+    """)
+
+
+def index_names(db):
+    # Assemble all geometries before indexing aliases: a polygon with holes can
+    # move the representative point across a cell/bbox boundary.
+    db.execute("DELETE FROM names")
+    for osm_id, parent, raw in db.execute("SELECT id,parent,data FROM features ORDER BY id").fetchall():
+        record = json.loads(raw)
+        db.executemany("INSERT OR IGNORE INTO names VALUES (?,?,?)",
+                       ((parent, term, osm_id) for term in aliases({**record["tags"], "name": record["name"]})))
+
+
 def export_records(source, dbpath, bbox=None, as_of=None, relation_audit=None,
                    quarantine_invalid_geometry=False, max_geometry_rejections=100):
     import osmium
@@ -322,12 +371,7 @@ def export_records(source, dbpath, bbox=None, as_of=None, relation_audit=None,
              "error": "incomplete_selected_polygon"})
         raise ValueError("Unassembled/incomplete selected relation(s): " + str(audit["blocked_polygon_relation_ids"][:20]))
     db = sqlite3.connect(dbpath)
-    db.executescript("""
-      CREATE TABLE features(id TEXT PRIMARY KEY, cell TEXT, parent TEXT, data TEXT, page TEXT);
-      CREATE TABLE names(cell TEXT, term TEXT, id TEXT, PRIMARY KEY(cell,term,id));
-      CREATE TABLE relations(id INTEGER PRIMARY KEY, assembled INTEGER NOT NULL);
-      CREATE TABLE geometry_rejections(id TEXT PRIMARY KEY, data TEXT NOT NULL);
-    """)
+    create_records_schema(db)
     factory = osmium.geom.WKBFactory()
     stats = {"selection_profile": SELECTION_PROFILE,
              "closed_candidates": 0, "unsupported_relations": 0, "repaired_geometries": 0,
@@ -456,10 +500,7 @@ def export_records(source, dbpath, bbox=None, as_of=None, relation_audit=None,
                              "unassembled_relation", "No complete area was assembled")
         # Assemble all geometries before indexing aliases: a polygon with holes
         # can move the representative point across a cell/bbox boundary.
-        for osm_id, parent, raw in db.execute("SELECT id,parent,data FROM features ORDER BY id"):
-            record = json.loads(raw)
-            db.executemany("INSERT OR IGNORE INTO names VALUES (?,?,?)",
-                           ((parent, term, osm_id) for term in aliases({**record["tags"], "name": record["name"]})))
+        index_names(db)
         db.commit()
         stats["features"] = db.execute("SELECT count(*) FROM features").fetchone()[0]
         stats["name_entries"] = db.execute("SELECT count(*) FROM names").fetchone()[0]
@@ -482,6 +523,87 @@ def export_records(source, dbpath, bbox=None, as_of=None, relation_audit=None,
             save(dbpath.parent / "export-stats.json", stats)
         finally:
             db.close()
+
+
+def record_version(raw):
+    return int(json.loads(raw)["osm_version"])
+
+
+def merge_records(inputs, output):
+    """Join per-region and per-tile exports by typed OSM id (node:/way:/relation:).
+
+    Extracts that overlap and tile edges repeat the same object. The newest
+    osm_version wins; on a tie the first input in sorted order is kept. An id
+    quarantined by any input is removed from the merge, so no merged feature has
+    a failed geometry. Lexical names are rebuilt from the merged features.
+    """
+    import collections
+    from contextlib import closing
+
+    dirs = sorted(Path(item) for item in inputs)
+    if not dirs or len({d.resolve() for d in dirs}) != len(dirs):
+        raise ValueError("Merge needs at least one distinct input directory")
+    exports = [load(d / "export-stats.json") for d in dirs]
+    reports = [load(d / "geometry-report.json") for d in dirs]
+    if len({e["closure_as_of"] for e in exports}) != 1:
+        raise ValueError("Merge inputs use different closure dates")
+    for export, report in zip(exports, reports):
+        if (export.get("selection_profile") != SELECTION_PROFILE or export.get("export_status") != "success"
+                or report.get("status") != "success" or report["closure_as_of"] != export["closure_as_of"]):
+            raise ValueError("Merge input is not a successful current-profile export")
+        if export["relation_integrity"]["blocked_polygon_relation_ids"]:
+            raise ValueError("Merge input has incomplete selected relations")
+    output.mkdir(parents=True, exist_ok=True)
+    if any(output.iterdir()):
+        raise ValueError("Merge output directory must be empty")
+    dbpath = output / "records.sqlite"
+    db = sqlite3.connect(dbpath)
+    create_records_schema(db)
+    for d in dirs:
+        with closing(sqlite3.connect(d / "records.sqlite")) as src:
+            rows = src.execute("SELECT id,cell,parent,data FROM features ORDER BY id").fetchall()
+            for feature_id, cell, parent, raw in rows:
+                current = db.execute("SELECT data FROM features WHERE id=?", (feature_id,)).fetchone()
+                if current is None or record_version(raw) > record_version(current[0]):
+                    db.execute("INSERT OR REPLACE INTO features VALUES (?,?,?,?,NULL)", (feature_id, cell, parent, raw))
+            db.executemany("INSERT OR REPLACE INTO geometry_rejections VALUES (?,?)",
+                           src.execute("SELECT id,data FROM geometry_rejections").fetchall())
+    rejected_rows = db.execute("SELECT id,data FROM geometry_rejections ORDER BY id").fetchall()
+    db.executemany("DELETE FROM features WHERE id=?", [(row[0],) for row in rejected_rows])
+    index_names(db)
+    db.commit()
+    features = db.execute("SELECT count(*) FROM features").fetchone()[0]
+    if not features:
+        raise ValueError("No features after merge; empty builds require investigation")
+    counts = collections.Counter()
+    for (raw,) in db.execute("SELECT data FROM features ORDER BY id").fetchall():
+        tags = json.loads(raw)["tags"]
+        for key in ("amenity", "shop"):
+            if key in tags:
+                counts[key + "=" + tags[key]] += 1
+    quality = "quarantined" if rejected_rows else "complete"
+    input_digest = hashlib.sha256("\n".join(sorted({e["geometry_input_sha256"] for e in exports})).encode()).hexdigest()
+    rejected = [json.loads(raw) for _, raw in rejected_rows]
+    db.close()
+    save(output / "geometry-report.json", {
+        "schema": 1, "status": "success", "geometry_quality": quality, "input_sha256": input_digest,
+        "closure_as_of": exports[0]["closure_as_of"], "rejected_count": len(rejected), "rejected_features": rejected,
+        "scope_note": "Merged regional/tile inputs; rejected areas may be outside the requested bbox. No point is fabricated.",
+    })
+    save(output / "export-stats.json", {
+        "selection_profile": SELECTION_PROFILE, "export_status": "success", "closure_as_of": exports[0]["closure_as_of"],
+        "geometry_input_sha256": input_digest, "geometry_quality": quality, "geometry_rejected_count": len(rejected),
+        "features": features, "name_entries": db_count(dbpath, "names"), "selection_counts": dict(sorted(counts.items())),
+        "merged_inputs": [{"name": d.name, "export": e} for d, e in zip(dirs, exports)],
+    })
+    save(output / "source.json", {"merged_inputs": [load(d / "source.json") for d in dirs]})
+    save(output / "pbf-header.json", {"merged_inputs": [load(d / "pbf-header.json") for d in dirs]})
+    return {"features": features, "rejected": len(rejected)}
+
+
+def db_count(dbpath, table):
+    with sqlite3.connect(dbpath) as db:
+        return db.execute("SELECT count(*) FROM " + table).fetchone()[0]
 
 
 def blob(output, value):
@@ -800,6 +922,9 @@ def main():
     p.add_argument("--relation-audit", type=Path)
     p.add_argument("--quarantine-invalid-geometry", action="store_true", help="Benchmark valid records, report exclusions; not complete coverage")
     p.add_argument("--max-geometry-rejections", type=int, default=100)
+    p = sub.add_parser("merge")
+    p.add_argument("--inputs", type=Path, nargs="+", required=True)
+    p.add_argument("--output", type=Path, required=True)
     p = sub.add_parser("index")
     p.add_argument("--db", type=Path, required=True)
     p.add_argument("--output", type=Path, required=True)
@@ -816,6 +941,7 @@ def main():
     p = sub.add_parser("audit-relations")
     p.add_argument("--input", type=Path, required=True)
     p.add_argument("--output", type=Path, required=True)
+    p.add_argument("--as-of", help="UTC date (YYYY-MM-DD) shared with the export that consumes this audit")
     sub.add_parser("selectors")
     p = sub.add_parser("measure")
     p.add_argument("--stage", required=True)
@@ -843,7 +969,7 @@ def main():
     elif args.action == "require-complete-geometry":
         require_complete_geometry(args.output)
     elif args.action == "audit-relations":
-        audit_relations(args.input, args.output)
+        audit_relations(args.input, args.output, dt.date.fromisoformat(args.as_of) if args.as_of else None)
     elif args.action == "selectors":
         print("\n".join(SELECTORS))
     elif args.action == "export":
@@ -853,6 +979,8 @@ def main():
             raise ValueError("Expected west,south,east,north bbox (no dateline wrap)")
         export_records(args.input, args.db, bbox, dt.date.fromisoformat(args.as_of) if args.as_of else None,
                        args.relation_audit, args.quarantine_invalid_geometry, args.max_geometry_rejections)
+    elif args.action == "merge":
+        print(encoded(merge_records(args.inputs, args.output)).decode())
     elif args.action == "index":
         build_indexes(args.db, args.output, args.source, args.header, args.scope)
     elif args.action == "package":

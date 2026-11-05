@@ -49,9 +49,13 @@ jobs:
     timeout-minutes: 10
     outputs:
       matrix: ${{ steps.plan.outputs.matrix }}
+      sources: ${{ steps.plan.outputs.sources }}
+      groups: ${{ steps.plan.outputs.groups }}
+      expected_assets: ${{ steps.plan.outputs.expected_assets }}
       publish: ${{ steps.plan.outputs.publish }}
       tag: ${{ steps.plan.outputs.tag }}
       artifact_limit: ${{ steps.plan.outputs.artifact_limit }}
+      as_of: ${{ steps.plan.outputs.as_of }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -71,7 +75,7 @@ jobs:
           SEED_SHA: ${{ inputs.seed_sha256 }}
         run: |
           python - <<'PY'
-          import json, os, re, sys
+          import datetime as dt, json, os, re, sys
           sys.path.insert(0, 'scripts')
           from pipeline import plan
           matrix = plan(os.environ['BENCHMARK'], os.environ['REGIONS'])
@@ -80,20 +84,36 @@ jobs:
               raise SystemExit('Invalid source mode')
           if mode == 'fresh' and os.environ['ALLOW_FULL'].lower() != 'true':
               raise SystemExit('Fresh mode requires explicit allow_full_download=true')
-          if mode == 'seed' and (len(matrix['include']) != 1
+          sources = sorted({row['region'] for row in matrix['include']})
+          if mode == 'seed' and (len(sources) != 1
                   or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._/-]{0,119}', os.environ['SEED_TAG'])
                   or not re.fullmatch(r'[0-9a-f]{64}', os.environ['SEED_SHA'])):
               raise SystemExit('Seed requires one region, an existing release tag and trusted lowercase SHA-256')
           publish = os.environ['PUBLISH'].lower() == 'true'
           if publish and os.environ['GITHUB_REF'] != 'refs/heads/' + os.environ['DEFAULT_BRANCH']:
               raise SystemExit('Release publication requires the reviewed default branch')
+          # One merge group per benchmark (or per full-regions region). Each group
+          # produces exactly one bundle, after its tile/region inputs are joined.
+          groups = {}
+          for row in matrix['include']:
+              groups.setdefault(row['group'], row['scope'])
+          expected = [name + suffix for name in groups for suffix in ('.tar.gz', '.tar.gz.json')]
+          expected += [row['key'] + '-metrics.json' for row in matrix['include']]
+          source_matrix = {'include': [{'region': region} for region in sources]}
+          merge_matrix = {'include': [{'group': group, 'scope': scope} for group, scope in sorted(groups.items())]}
+          # One closure date for every job, so tiles that cross UTC midnight still merge.
+          as_of = dt.datetime.now(dt.timezone.utc).date().isoformat()
           with open(os.environ['GITHUB_OUTPUT'], 'a') as stream:
+              print('as_of=' + as_of, file=stream)
               print('matrix=' + json.dumps(matrix, separators=(',', ':')), file=stream)
+              print('sources=' + json.dumps(source_matrix, separators=(',', ':')), file=stream)
+              print('groups=' + json.dumps(merge_matrix, separators=(',', ':')), file=stream)
+              print('expected_assets=' + json.dumps(sorted(expected), separators=(',', ':')), file=stream)
               print('publish=' + str(publish).lower(), file=stream)
               print('tag=data-' + os.environ['GITHUB_RUN_ID'] + '-' + os.environ['GITHUB_RUN_ATTEMPT'], file=stream)
-              # Aggregate review artifacts <= 200 MB/run, each <= 20 MB. Larger
-              # datasets require Releases, not a national Actions artifact store.
-              print('artifact_limit=' + str(min(20_000_000, 200_000_000 // len(matrix['include']))), file=stream)
+              # Review artifacts <= 200 MB/run, each <= 20 MB. Larger datasets
+              # require Releases, not a national Actions artifact store.
+              print('artifact_limit=' + str(min(20_000_000, 200_000_000 // len(groups))), file=stream)
           PY
 
   prepare-release:
@@ -111,26 +131,26 @@ jobs:
       - name: Create an unpublished dataset draft
         run: gh release create "$TAG" --draft --target "$GITHUB_SHA" --title "$TAG" --notes 'OSM-derived regional place indexes. See bundled manifests, checksums, measurements and ODbL notices. Not independently verified business opening status.'
 
-  build:
+  source:
+    # One regional checkpoint per region, shared by every tile job of that region.
+    # Tile jobs restore it; they never download or write it, so parallel tiles
+    # cannot race on the same cache entry.
     needs: [plan, prepare-release]
     if: ${{ !cancelled() && needs.plan.result == 'success' && (needs.prepare-release.result == 'success' || needs.prepare-release.result == 'skipped') }}
-    permissions:
-      contents: write
-      actions: read
     runs-on: ubuntu-24.04
-    timeout-minutes: 300
+    timeout-minutes: 70
     strategy:
       fail-fast: false
       max-parallel: 2
-      matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
+      matrix: ${{ fromJSON(needs.plan.outputs.sources) }}
     env:
       REGION: ${{ matrix.region }}
-      SCOPE: ${{ matrix.scope }}
-      KEY: ${{ matrix.key }}
-      BBOX: ${{ matrix.bbox }}
       PYTHONUNBUFFERED: '1'
       SOURCE_MODE: ${{ inputs.source_mode || (github.event_name == 'schedule' && 'update') || 'auto' }}
       ALLOW_FULL: ${{ inputs.allow_full_download == true || (github.event_name == 'schedule' && vars.ALLOW_FULL_DOWNLOADS == 'true') }}
+    permissions:
+      contents: read
+      actions: read
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -223,6 +243,72 @@ jobs:
           if not confirmed:
               raise SystemExit('Cache persistence not confirmed; stopping before downstream work. Check Actions cache service/quota. Do not authorize another full download blindly.')
           PY
+      - name: Keep source measurements
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: measurements-source-${{ matrix.region }}
+          path: |
+            work/metrics.json
+            work/cache-state.json
+            work/tool-versions.txt
+          if-no-files-found: warn
+          retention-days: 7
+
+  build:
+    # One job per tile (or per region for full-regions). Filters the shared
+    # checkpoint, exports only its box, and hands the SQLite records to merge.
+    needs: [plan, source]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 300
+    strategy:
+      fail-fast: false
+      max-parallel: 2
+      matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
+    env:
+      REGION: ${{ matrix.region }}
+      SCOPE: ${{ matrix.scope }}
+      GROUP: ${{ matrix.group }}
+      KEY: ${{ matrix.key }}
+      BBOX: ${{ matrix.bbox }}
+      PYTHONUNBUFFERED: '1'
+      AS_OF: ${{ needs.plan.outputs.as_of }}
+      TAG: ${{ needs.plan.outputs.tag }}
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: '3.11'
+      - name: Restore complete regional PBF checkpoint written by the source job
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: |
+            work/source.osm.pbf
+            work/source.json
+          key: regional-pbf-v1-${{ runner.os }}-${{ runner.arch }}-${{ matrix.region }}-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: |
+            regional-pbf-v1-${{ runner.os }}-${{ runner.arch }}-${{ matrix.region }}-
+      - name: Fail closed when the checkpoint is missing
+        shell: bash
+        run: |
+          mkdir -p work artifacts
+          if [[ ! -s work/source.osm.pbf || ! -s work/source.json ]]; then
+            echo '::error::Regional checkpoint not restored for this tile. Tile builds never download sources.'
+            exit 1
+          fi
+      - name: Install native filter and pinned geometry tools
+        timeout-minutes: 15
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends osmium-tool curl
+          python -m pip install -r requirements.txt
+          mkdir -p work artifacts
+          osmium --version > work/tool-versions.txt
+          python -m pip freeze >> work/tool-versions.txt
       - name: Record the selected checkpoint header
         run: osmium fileinfo --json work/source.osm.pbf > work/pbf-header.json
       - name: Native tag filter retaining references
@@ -238,24 +324,27 @@ jobs:
           python scripts/pipeline.py measure --stage references --metrics work/metrics.json --seconds 600 -- \
             osmium check-refs work/filtered.osm.pbf
           python scripts/pipeline.py measure --stage relation-audit --metrics work/metrics.json --seconds 300 -- \
-            python scripts/pipeline.py audit-relations --input work/filtered.osm.pbf --output work/relation-audit.json
+            python scripts/pipeline.py audit-relations --input work/filtered.osm.pbf --output work/relation-audit.json --as-of "$AS_OF"
           rm work/source.osm.pbf
-      - name: Resolve only filtered geometry and scope records
+      - name: Resolve only filtered geometry and scope records for this tile
         timeout-minutes: 46
         run: |
           python scripts/pipeline.py measure --stage geometry --metrics work/metrics.json --seconds 2700 -- \
-            python scripts/pipeline.py export --input work/filtered.osm.pbf --db work/records.sqlite --bbox="$BBOX" --relation-audit work/relation-audit.json --quarantine-invalid-geometry
+            python scripts/pipeline.py export --input work/filtered.osm.pbf --db work/records.sqlite --bbox="$BBOX" --as-of "$AS_OF" --relation-audit work/relation-audit.json --quarantine-invalid-geometry
           rm work/filtered.osm.pbf
-      - name: Build spatial and lexical pages
-        timeout-minutes: 46
-        run: |
-          python scripts/pipeline.py measure --stage indexes --metrics work/metrics.json --seconds 2700 -- \
-            python scripts/pipeline.py index --db work/records.sqlite --output output --source work/source.json --header work/pbf-header.json --scope "$SCOPE"
-      - name: Verify all pages and package derived data only
-        timeout-minutes: 31
-        run: |
-          python scripts/pipeline.py measure --stage package --metrics work/metrics.json --seconds 1800 -- \
-            python scripts/pipeline.py package --output output --bundle "artifacts/${KEY}.tar.gz"
+      - name: Hand off tile records for the merge job
+        if: success()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: records-${{ matrix.group }}--${{ matrix.key }}
+          path: |
+            work/records.sqlite
+            work/export-stats.json
+            work/geometry-report.json
+            work/source.json
+            work/pbf-header.json
+          if-no-files-found: error
+          retention-days: 1
       - name: Always write compact measurements
         if: always()
         run: python scripts/pipeline.py report --work work --output "artifacts/${KEY}-metrics.json"
@@ -266,11 +355,75 @@ jobs:
           name: measurements-${{ matrix.key }}
           path: |
             artifacts/*-metrics.json
-            artifacts/*.tar.gz.json
             work/tool-versions.txt
             work/relation-audit.json
             work/geometry-report.json
-            work/cache-state.json
+          if-no-files-found: warn
+          retention-days: 7
+      - name: Upload tile metrics into the draft release
+        if: success() && needs.plan.outputs.publish == 'true'
+        run: gh release upload "$TAG" "artifacts/${KEY}-metrics.json"
+
+  merge:
+    # Joins every tile/region of one benchmark by typed OSM id, then builds,
+    # verifies and packages exactly one bundle for that benchmark.
+    needs: [plan, build]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      max-parallel: 2
+      matrix: ${{ fromJSON(needs.plan.outputs.groups) }}
+    permissions:
+      contents: write
+      actions: read
+    env:
+      GROUP: ${{ matrix.group }}
+      SCOPE: ${{ matrix.scope }}
+      PYTHONUNBUFFERED: '1'
+      LIMIT: ${{ needs.plan.outputs.artifact_limit }}
+      TAG: ${{ needs.plan.outputs.tag }}
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: '3.11'
+      - name: Download the tile records of this benchmark
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          pattern: records-${{ matrix.group }}--*
+          path: handoff
+      - name: Merge by typed OSM id, then build indexes
+        shell: bash
+        run: |
+          mkdir -p work artifacts output
+          mapfile -t inputs < <(find handoff -mindepth 1 -maxdepth 1 -type d | sort)
+          if [[ "${#inputs[@]}" -lt 1 ]]; then echo '::error::No tile inputs were handed off'; exit 1; fi
+          python scripts/pipeline.py measure --stage merge --metrics work/metrics.json --seconds 1800 -- \
+            python scripts/pipeline.py merge --inputs "${inputs[@]}" --output work/merged
+          python scripts/pipeline.py measure --stage indexes --metrics work/metrics.json --seconds 2700 -- \
+            python scripts/pipeline.py index --db work/merged/records.sqlite --output output --source work/merged/source.json --header work/merged/pbf-header.json --scope "$SCOPE"
+      - name: Verify all pages and package derived data only
+        timeout-minutes: 31
+        run: |
+          python scripts/pipeline.py measure --stage package --metrics work/metrics.json --seconds 1800 -- \
+            python scripts/pipeline.py package --output output --bundle "artifacts/${GROUP}.tar.gz"
+      - name: Always write merged measurements
+        if: always()
+        run: python scripts/pipeline.py report --work work --output "artifacts/${GROUP}-merge-metrics.json"
+      - name: Preserve merge measurements even when a stage fails
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: merge-measurements-${{ matrix.group }}
+          path: |
+            artifacts/*-merge-metrics.json
+            work/merged/geometry-report.json
+            work/merged/export-stats.json
           if-no-files-found: warn
           retention-days: 7
       - name: Block release publication of quarantined benchmark data
@@ -278,21 +431,15 @@ jobs:
         run: python scripts/pipeline.py require-complete-geometry --output output
       - name: Upload validated bundle into the draft release
         if: success() && needs.plan.outputs.publish == 'true'
-        env:
-          GH_TOKEN: ${{ github.token }}
-          GH_REPO: ${{ github.repository }}
-          TAG: ${{ needs.plan.outputs.tag }}
-        run: gh release upload "$TAG" "artifacts/${KEY}.tar.gz" "artifacts/${KEY}.tar.gz.json" "artifacts/${KEY}-metrics.json"
+        run: gh release upload "$TAG" "artifacts/${GROUP}.tar.gz" "artifacts/${GROUP}.tar.gz.json"
       - name: Check review artifact allowance
         if: success() && needs.plan.outputs.publish != 'true'
         id: review
-        env:
-          LIMIT: ${{ needs.plan.outputs.artifact_limit }}
         run: |
           python - <<'PY'
           import os
           from pathlib import Path
-          size = Path('artifacts/' + os.environ['KEY'] + '.tar.gz').stat().st_size
+          size = Path('artifacts/' + os.environ['GROUP'] + '.tar.gz').stat().st_size
           allowed = size <= int(os.environ['LIMIT'])
           with open(os.environ['GITHUB_OUTPUT'], 'a') as stream:
               print('allowed=' + str(allowed).lower(), file=stream)
@@ -303,13 +450,13 @@ jobs:
         if: steps.review.outputs.allowed == 'true'
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: dataset-${{ matrix.key }}
-          path: artifacts/*.tar.gz
+          name: dataset-${{ matrix.group }}
+          path: artifacts/${{ matrix.group }}.tar.gz
           compression-level: 0
           retention-days: 1
 
   publish:
-    needs: [plan, build]
+    needs: [plan, merge]
     if: success() && needs.plan.outputs.publish == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 5
@@ -319,7 +466,7 @@ jobs:
       GH_TOKEN: ${{ github.token }}
       GH_REPO: ${{ github.repository }}
       TAG: ${{ needs.plan.outputs.tag }}
-      MATRIX: ${{ needs.plan.outputs.matrix }}
+      EXPECTED: ${{ needs.plan.outputs.expected_assets }}
     steps:
       - name: Check the complete asset inventory before publishing
         run: |
@@ -327,8 +474,7 @@ jobs:
           python - <<'PY'
           import json, os
           actual = {a['name'] for a in json.load(open('release-assets.json'))['assets']}
-          expected = {row['key'] + suffix for row in json.loads(os.environ['MATRIX'])['include']
-                      for suffix in ('.tar.gz', '.tar.gz.json', '-metrics.json')}
+          expected = set(json.loads(os.environ['EXPECTED']))
           if actual != expected:
               raise SystemExit('Incomplete or unexpected release asset inventory')
           PY

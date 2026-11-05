@@ -140,6 +140,10 @@
         40.35,
         -73.35,
         41.35
+      ],
+      "tiles": [
+        2,
+        2
       ]
     },
     "miami": {
@@ -151,7 +155,897 @@
         25.4,
         -80.05,
         26.4
+      ],
+      "tiles": [
+        2,
+        2
       ]
     }
+  },
+  "metro_rectangles": {
+    "_source": "GHS-FUA R2019A (EU JRC, 2015 boundaries) via brianbalzar/urban-footprints (MIT); ranking: Census 2025 metro estimates",
+    "_notes": "Bboxes are the FUA polygon bounds floored/ceiled to 0.01 degrees. Names are single cities; census_metro is the full CBSA name. Rank 2 and rank 12 share one FUA polygon.",
+    "metros": [
+      {
+        "rank": 1,
+        "name": "New York",
+        "census_metro": "New York-Newark-Jersey City, NY-NJ",
+        "census_population_2025": 20112448,
+        "ghs_fua_id": "7244",
+        "bbox": [
+          -74.93,
+          39.65,
+          -72.35,
+          41.66
+        ]
+      },
+      {
+        "rank": 2,
+        "name": "Los Angeles",
+        "census_metro": "Los Angeles-Long Beach-Anaheim, CA",
+        "census_population_2025": 12844441,
+        "ghs_fua_id": "1642",
+        "bbox": [
+          -119.11,
+          33.37,
+          -116.78,
+          34.41
+        ]
+      },
+      {
+        "rank": 3,
+        "name": "Chicago",
+        "census_metro": "Chicago-Naperville-Elgin, IL-IN",
+        "census_population_2025": 9434123,
+        "ghs_fua_id": "6654",
+        "bbox": [
+          -88.95,
+          41.14,
+          -86.76,
+          42.4
+        ]
+      },
+      {
+        "rank": 4,
+        "name": "Dallas",
+        "census_metro": "Dallas-Fort Worth-Arlington, TX",
+        "census_population_2025": 8477157,
+        "ghs_fua_id": "5543",
+        "bbox": [
+          -97.94,
+          32.15,
+          -95.94,
+          33.69
+        ]
+      },
+      {
+        "rank": 5,
+        "name": "Houston",
+        "census_metro": "Houston-Pasadena-The Woodlands, TX",
+        "census_population_2025": 7904627,
+        "ghs_fua_id": "5511",
+        "bbox": [
+          -96.36,
+          29.03,
+          -94.66,
+          30.74
+        ]
+      },
+      {
+        "rank": 6,
+        "name": "Atlanta",
+        "census_metro": "Atlanta-Sandy Springs-Roswell, GA",
+        "census_population_2025": 6482182,
+        "ghs_fua_id": "6451",
+        "bbox": [
+          -85.03,
+          33.17,
+          -83.49,
+          34.38
+        ]
+      },
+      {
+        "rank": 7,
+        "name": "Washington",
+        "census_metro": "Washington-Arlington-Alexandria, DC-VA-MD-WV",
+        "census_population_2025": 6465724,
+        "ghs_fua_id": "7068",
+        "bbox": [
+          -77.81,
+          38.4,
+          -76.47,
+          39.4
+        ]
+      },
+      {
+        "rank": 8,
+        "name": "Miami",
+        "census_metro": "Miami-Fort Lauderdale-West Palm Beach, FL",
+        "census_population_2025": 6391072,
+        "ghs_fua_id": "6442",
+        "bbox": [
+          -80.74,
+          25.4,
+          -80.01,
+          27.07
+        ]
+      },
+      {
+        "rank": 9,
+        "name": "Philadelphia",
+        "census_metro": "Philadelphia-Camden-Wilmington, PA-NJ-DE-MD",
+        "census_population_2025": 6329118,
+        "ghs_fua_id": "7165",
+        "bbox": [
+          -76.19,
+          39.18,
+          -74.45,
+          40.46
+        ]
+      },
+      {
+        "rank": 10,
+        "name": "Phoenix",
+        "census_metro": "Phoenix-Mesa-Chandler, AZ",
+        "census_population_2025": 5228938,
+        "ghs_fua_id": "4211",
+        "bbox": [
+          -112.79,
+          32.81,
+          -111.08,
+          34.09
+        ]
+      },
+      {
+        "rank": 11,
+        "name": "Boston",
+        "census_metro": "Boston-Cambridge-Newton, MA-NH",
+        "census_population_2025": 5034221,
+        "ghs_fua_id": "7347",
+        "bbox": [
+          -71.44,
+          42.0,
+          -70.59,
+          42.74
+        ]
+      },
+      {
+        "rank": 12,
+        "name": "Riverside",
+        "census_metro": "Riverside-San Bernardino-Ontario, CA",
+        "census_population_2025": 4769007,
+        "ghs_fua_id": "1642",
+        "bbox": [
+          -119.11,
+          33.37,
+          -116.78,
+          34.41
+        ]
+      },
+      {
+        "rank": 13,
+        "name": "San Francisco",
+        "census_metro": "San Francisco-Oakland-Fremont, CA",
+        "census_population_2025": 4630041,
+        "ghs_fua_id": "1255",
+        "bbox": [
+          -122.82,
+          37.05,
+          -121.55,
+          38.13
+        ]
+      },
+      {
+        "rank": 14,
+        "name": "Detroit",
+        "census_metro": "Detroit-Warren-Dearborn, MI",
+        "census_population_2025": 4390913,
+        "ghs_fua_id": "6948",
+        "bbox": [
+          -84.02,
+          41.91,
+          -82.4,
+          43.14
+        ]
+      },
+      {
+        "rank": 15,
+        "name": "Seattle",
+        "census_metro": "Seattle-Tacoma-Bellevue, WA",
+        "census_population_2025": 4161883,
+        "ghs_fua_id": "4510",
+        "bbox": [
+          -122.91,
+          46.86,
+          -121.65,
+          48.4
+        ]
+      },
+      {
+        "rank": 16,
+        "name": "Minneapolis",
+        "census_metro": "Minneapolis-St. Paul-Bloomington, MN-WI",
+        "census_population_2025": 3790295,
+        "ghs_fua_id": "6433",
+        "bbox": [
+          -93.95,
+          44.43,
+          -92.34,
+          45.58
+        ]
+      },
+      {
+        "rank": 17,
+        "name": "Tampa",
+        "census_metro": "Tampa-St. Petersburg-Clearwater, FL",
+        "census_population_2025": 3418895,
+        "ghs_fua_id": "6237",
+        "bbox": [
+          -82.88,
+          27.63,
+          -82.08,
+          28.41
+        ]
+      },
+      {
+        "rank": 18,
+        "name": "San Diego",
+        "census_metro": "San Diego-Chula Vista-Carlsbad, CA",
+        "census_population_2025": 3282248,
+        "ghs_fua_id": "2204",
+        "bbox": [
+          -117.46,
+          32.53,
+          -116.51,
+          33.39
+        ]
+      },
+      {
+        "rank": 19,
+        "name": "Denver",
+        "census_metro": "Denver-Aurora-Centennial, CO",
+        "census_population_2025": 3092037,
+        "ghs_fua_id": "5332",
+        "bbox": [
+          -105.71,
+          39.24,
+          -104.3,
+          40.12
+        ]
+      },
+      {
+        "rank": 20,
+        "name": "Orlando",
+        "census_metro": "Orlando-Kissimmee-Sanford, FL",
+        "census_population_2025": 2957672,
+        "ghs_fua_id": "6487",
+        "bbox": [
+          -81.91,
+          28.01,
+          -80.97,
+          28.97
+        ]
+      },
+      {
+        "rank": 21,
+        "name": "Charlotte",
+        "census_metro": "Charlotte-Concord-Gastonia, NC-SC",
+        "census_population_2025": 2938830,
+        "ghs_fua_id": "6851",
+        "bbox": [
+          -81.34,
+          34.84,
+          -80.37,
+          35.61
+        ]
+      },
+      {
+        "rank": 22,
+        "name": "Baltimore",
+        "census_metro": "Baltimore-Columbia-Towson, MD",
+        "census_population_2025": 2857781,
+        "ghs_fua_id": "7123",
+        "bbox": [
+          -77.11,
+          38.89,
+          -76.12,
+          39.73
+        ]
+      },
+      {
+        "rank": 23,
+        "name": "St. Louis",
+        "census_metro": "St. Louis, MO-IL",
+        "census_population_2025": 2814421,
+        "ghs_fua_id": "6192",
+        "bbox": [
+          -91.06,
+          38.11,
+          -89.63,
+          39.14
+        ]
+      },
+      {
+        "rank": 24,
+        "name": "San Antonio",
+        "census_metro": "San Antonio-New Braunfels, TX",
+        "census_population_2025": 2813140,
+        "ghs_fua_id": "5229",
+        "bbox": [
+          -98.99,
+          28.96,
+          -97.86,
+          29.95
+        ]
+      },
+      {
+        "rank": 25,
+        "name": "Austin",
+        "census_metro": "Austin-Round Rock-San Marcos, TX",
+        "census_population_2025": 2620945,
+        "ghs_fua_id": "5349",
+        "bbox": [
+          -98.13,
+          29.83,
+          -97.29,
+          30.84
+        ]
+      },
+      {
+        "rank": 26,
+        "name": "Portland",
+        "census_metro": "Portland-Vancouver-Hillsboro, OR-WA",
+        "census_population_2025": 2542282,
+        "ghs_fua_id": "4444",
+        "bbox": [
+          -123.21,
+          45.13,
+          -121.93,
+          46.02
+        ]
+      },
+      {
+        "rank": 27,
+        "name": "Sacramento",
+        "census_metro": "Sacramento-Roseville-Folsom, CA",
+        "census_population_2025": 2477274,
+        "ghs_fua_id": "3652",
+        "bbox": [
+          -121.6,
+          38.24,
+          -120.73,
+          39.12
+        ]
+      },
+      {
+        "rank": 28,
+        "name": "Pittsburgh",
+        "census_metro": "Pittsburgh, PA",
+        "census_population_2025": 2421992,
+        "ghs_fua_id": "7020",
+        "bbox": [
+          -80.59,
+          39.99,
+          -79.4,
+          40.98
+        ]
+      },
+      {
+        "rank": 29,
+        "name": "Las Vegas",
+        "census_metro": "Las Vegas-Henderson-North Las Vegas, NV",
+        "census_population_2025": 2407226,
+        "ghs_fua_id": "4143",
+        "bbox": [
+          -115.56,
+          35.91,
+          -114.8,
+          36.53
+        ]
+      },
+      {
+        "rank": 30,
+        "name": "Cincinnati",
+        "census_metro": "Cincinnati, OH-KY-IN",
+        "census_population_2025": 2312858,
+        "ghs_fua_id": "6790",
+        "bbox": [
+          -85.03,
+          38.71,
+          -83.95,
+          39.71
+        ]
+      }
+    ]
+  },
+  "city_rectangles": {
+    "_source": "Cities ranked by 2010 population from cestastanford/historical-us-city-populations (data/1790-2010_MASTER.csv, Stanford/Census). Rectangles: bounds of the 2013 Census CBSA polygon (joehand/US_Census_CBSA, cb_2013_us_cbsa_500k.shp) containing each city's Stanford coordinates, rounded outward to 0.01 degrees.",
+    "_notes": "Population ranking is 2010, not 2025. CBSA boundaries are 2013 delineations. Each entry is named after its largest city. Entries with merged_from absorbed the listed cities: their bbox is the union of the member boxes. Entries with bbox_source 'user-supplied city-only rectangle' use the user's pasted box unless they were widened to include merged cities. Entries with bbox_source 'metro (CBSA-based)' use the metro extent. Not benchmarks; not used by scripts/pipeline.py.",
+    "cities": [
+      {
+        "rank": 1,
+        "name": "New York City",
+        "state": "NY",
+        "population_2010": 8175133,
+        "cbsa": "New York-Newark-Jersey City, NY-NJ-PA",
+        "bbox": [
+          -75.36,
+          39.49,
+          -71.85,
+          42.09
+        ],
+        "bbox_source": "user-supplied city-only rectangle, widened to include merged cities",
+        "merged_from": [
+          "Newark",
+          "Jersey City"
+        ],
+        "merged_from_population_2010": {
+          "Newark": 277140,
+          "Jersey City": 247597
+        }
+      },
+      {
+        "rank": 2,
+        "name": "Los Angeles",
+        "state": "CA",
+        "population_2010": 3792621,
+        "cbsa": "Los Angeles-Long Beach-Anaheim, CA",
+        "bbox": [
+          -118.95,
+          32.8,
+          -117.41,
+          34.83
+        ],
+        "bbox_source": "user-supplied city-only rectangle, widened to include merged cities",
+        "merged_from": [
+          "Long Beach",
+          "Anaheim",
+          "Santa Ana"
+        ],
+        "merged_from_population_2010": {
+          "Long Beach": 462257,
+          "Anaheim": 336265,
+          "Santa Ana": 324528
+        }
+      },
+      {
+        "rank": 3,
+        "name": "Chicago",
+        "state": "IL",
+        "population_2010": 2695598,
+        "cbsa": "Chicago-Naperville-Elgin, IL-IN-WI",
+        "bbox": [
+          -87.94,
+          41.64,
+          -87.52,
+          42.02
+        ],
+        "bbox_source": "user-supplied city-only rectangle"
+      },
+      {
+        "rank": 4,
+        "name": "Houston",
+        "state": "TX",
+        "population_2010": 2099451,
+        "cbsa": "Houston-The Woodlands-Sugar Land, TX",
+        "bbox": [
+          -95.79,
+          29.5,
+          -95.01,
+          30.12
+        ],
+        "bbox_source": "user-supplied city-only rectangle"
+      },
+      {
+        "rank": 5,
+        "name": "Philadelphia",
+        "state": "PA",
+        "population_2010": 1526006,
+        "cbsa": "Philadelphia-Camden-Wilmington, PA-NJ-DE-MD",
+        "bbox": [
+          -75.28,
+          39.86,
+          -74.95,
+          40.14
+        ],
+        "bbox_source": "user-supplied city-only rectangle"
+      },
+      {
+        "rank": 6,
+        "name": "Phoenix",
+        "state": "AZ",
+        "population_2010": 1445632,
+        "cbsa": "Phoenix-Mesa-Scottsdale, AZ",
+        "bbox": [
+          -113.34,
+          32.5,
+          -110.44,
+          34.05
+        ],
+        "bbox_source": "user-supplied city-only rectangle, widened to include merged cities",
+        "merged_from": [
+          "Mesa"
+        ],
+        "merged_from_population_2010": {
+          "Mesa": 439041
+        }
+      },
+      {
+        "rank": 7,
+        "name": "San Antonio",
+        "state": "TX",
+        "population_2010": 1327407,
+        "cbsa": "San Antonio-New Braunfels, TX",
+        "bbox": [
+          -98.7,
+          29.18,
+          -98.22,
+          29.73
+        ],
+        "bbox_source": "user-supplied city-only rectangle"
+      },
+      {
+        "rank": 8,
+        "name": "San Diego",
+        "state": "CA",
+        "population_2010": 1307402,
+        "cbsa": "San Diego-Carlsbad, CA",
+        "bbox": [
+          -117.28,
+          32.53,
+          -116.91,
+          33.11
+        ],
+        "bbox_source": "user-supplied city-only rectangle"
+      },
+      {
+        "rank": 9,
+        "name": "Dallas",
+        "state": "TX",
+        "population_2010": 1197816,
+        "cbsa": "Dallas-Fort Worth-Arlington, TX",
+        "bbox": [
+          -98.07,
+          32.05,
+          -95.85,
+          33.44
+        ],
+        "bbox_source": "user-supplied city-only rectangle, widened to include merged cities",
+        "merged_from": [
+          "Arlington",
+          "Plano"
+        ],
+        "merged_from_population_2010": {
+          "Arlington": 365438,
+          "Plano": 259841
+        }
+      },
+      {
+        "rank": 10,
+        "name": "San Jose",
+        "state": "CA",
+        "population_2010": 945942,
+        "cbsa": "San Jose-Sunnyvale-Santa Clara, CA",
+        "bbox": [
+          -122.04,
+          37.12,
+          -121.7,
+          37.47
+        ],
+        "bbox_source": "user-supplied city-only rectangle"
+      },
+      {
+        "rank": 11,
+        "name": "Jacksonville",
+        "state": "FL",
+        "population_2010": 821784,
+        "cbsa": "Jacksonville, FL",
+        "bbox": [
+          -82.05,
+          30.1,
+          -81.32,
+          30.57
+        ],
+        "bbox_source": "user-supplied city-only rectangle"
+      },
+      {
+        "rank": 12,
+        "name": "Indianapolis",
+        "state": "IN",
+        "population_2010": 820445,
+        "cbsa": "Indianapolis-Carmel-Anderson, IN",
+        "bbox": [
+          -86.33,
+          39.63,
+          -85.94,
+          39.93
+        ],
+        "bbox_source": "user-supplied city-only rectangle"
+      },
+      {
+        "rank": 13,
+        "name": "San Francisco",
+        "state": "CA",
+        "population_2010": 805235,
+        "cbsa": "San Francisco-Oakland-Hayward, CA",
+        "bbox": [
+          -123.03,
+          37.1,
+          -121.46,
+          38.33
+        ],
+        "bbox_source": "user-supplied city-only rectangle, widened to include merged cities",
+        "merged_from": [
+          "Oakland"
+        ],
+        "merged_from_population_2010": {
+          "Oakland": 390724
+        }
+      },
+      {
+        "rank": 14,
+        "name": "Austin",
+        "state": "TX",
+        "population_2010": 790390,
+        "cbsa": "Austin-Round Rock, TX",
+        "bbox": [
+          -97.93,
+          30.09,
+          -97.56,
+          30.51
+        ],
+        "bbox_source": "user-supplied city-only rectangle"
+      },
+      {
+        "rank": 15,
+        "name": "Columbus",
+        "state": "OH",
+        "population_2010": 787033,
+        "cbsa": "Columbus, OH",
+        "bbox": [
+          -83.21,
+          39.81,
+          -82.77,
+          40.16
+        ],
+        "bbox_source": "user-supplied city-only rectangle"
+      },
+      {
+        "rank": 16,
+        "name": "Fort Worth",
+        "state": "TX",
+        "population_2010": 741206,
+        "cbsa": "Dallas-Fort Worth-Arlington, TX",
+        "bbox": [
+          -97.54,
+          32.55,
+          -97.03,
+          33.02
+        ],
+        "bbox_source": "user-supplied city-only rectangle"
+      },
+      {
+        "rank": 17,
+        "name": "Charlotte",
+        "state": "NC",
+        "population_2010": 731424,
+        "cbsa": "Charlotte-Concord-Gastonia, NC-SC",
+        "bbox": [
+          -81.01,
+          35.01,
+          -80.67,
+          35.39
+        ],
+        "bbox_source": "user-supplied city-only rectangle"
+      },
+      {
+        "rank": 18,
+        "name": "Detroit",
+        "state": "MI",
+        "population_2010": 713777,
+        "cbsa": "Detroit-Warren-Dearborn, MI",
+        "bbox": [
+          -83.29,
+          42.25,
+          -82.91,
+          42.45
+        ],
+        "bbox_source": "user-supplied city-only rectangle"
+      },
+      {
+        "rank": 21,
+        "name": "Baltimore",
+        "state": "MD",
+        "population_2010": 620961,
+        "cbsa": "Baltimore-Columbia-Towson, MD",
+        "bbox": [
+          -77.32,
+          38.71,
+          -75.74,
+          39.73
+        ],
+        "bbox_source": "metro (CBSA-based)",
+        "merged_from": [],
+        "merged_from_population_2010": {}
+      },
+      {
+        "rank": 22,
+        "name": "Boston",
+        "state": "MA",
+        "population_2010": 617594,
+        "cbsa": "Boston-Cambridge-Newton, MA-NH",
+        "bbox": [
+          -71.19,
+          42.23,
+          -70.92,
+          42.4
+        ],
+        "bbox_source": "user-supplied city-only rectangle"
+      },
+      {
+        "rank": 23,
+        "name": "Seattle",
+        "state": "WA",
+        "population_2010": 608660,
+        "cbsa": "Seattle-Tacoma-Bellevue, WA",
+        "bbox": [
+          -122.43,
+          47.49,
+          -122.24,
+          47.73
+        ],
+        "bbox_source": "user-supplied city-only rectangle"
+      },
+      {
+        "rank": 24,
+        "name": "Washington",
+        "state": "DC",
+        "population_2010": 601723,
+        "cbsa": "Washington-Arlington-Alexandria, DC-VA-MD-WV",
+        "bbox": [
+          -77.12,
+          38.81,
+          -76.91,
+          38.99
+        ],
+        "bbox_source": "user-supplied city-only rectangle"
+      },
+      {
+        "rank": 26,
+        "name": "Denver",
+        "state": "CO",
+        "population_2010": 600158,
+        "cbsa": "Denver-Aurora-Lakewood, CO",
+        "bbox": [
+          -106.22,
+          38.69,
+          -103.7,
+          40.05
+        ],
+        "bbox_source": "user-supplied city-only rectangle, widened to include merged cities",
+        "merged_from": [
+          "Aurora"
+        ],
+        "merged_from_population_2010": {
+          "Aurora": 325078
+        }
+      },
+      {
+        "rank": 30,
+        "name": "Las Vegas",
+        "state": "NV",
+        "population_2010": 583756,
+        "cbsa": "Las Vegas-Henderson-Paradise, NV",
+        "bbox": [
+          -115.9,
+          35.0,
+          -114.04,
+          36.86
+        ],
+        "bbox_source": "user-supplied city-only rectangle, widened to include merged cities",
+        "merged_from": [
+          "Henderson"
+        ],
+        "merged_from_population_2010": {
+          "Henderson": 257729
+        }
+      },
+      {
+        "rank": 40,
+        "name": "Atlanta",
+        "state": "GA",
+        "population_2010": 420003,
+        "cbsa": "Atlanta-Sandy Springs-Roswell, GA",
+        "bbox": [
+          -85.39,
+          32.84,
+          -83.26,
+          34.62
+        ],
+        "bbox_source": "metro (CBSA-based)",
+        "merged_from": [],
+        "merged_from_population_2010": {}
+      },
+      {
+        "rank": 44,
+        "name": "Miami",
+        "state": "FL",
+        "population_2010": 399457,
+        "cbsa": "Miami-Fort Lauderdale-West Palm Beach, FL",
+        "bbox": [
+          -80.32,
+          25.71,
+          -80.14,
+          25.86
+        ],
+        "bbox_source": "user-supplied city-only rectangle"
+      },
+      {
+        "rank": 49,
+        "name": "Minneapolis",
+        "state": "MN",
+        "population_2010": 382578,
+        "cbsa": "Minneapolis-St. Paul-Bloomington, MN-WI",
+        "bbox": [
+          -94.63,
+          44.19,
+          -92.13,
+          46.25
+        ],
+        "bbox_source": "metro (CBSA-based)",
+        "merged_from": [
+          "St. Paul"
+        ],
+        "merged_from_population_2010": {
+          "St. Paul": 285068
+        }
+      },
+      {
+        "rank": 55,
+        "name": "Tampa",
+        "state": "FL",
+        "population_2010": 335709,
+        "cbsa": "Tampa-St. Petersburg-Clearwater, FL",
+        "bbox": [
+          -82.86,
+          27.57,
+          -82.05,
+          28.7
+        ],
+        "bbox_source": "metro (CBSA-based)",
+        "merged_from": [],
+        "merged_from_population_2010": {}
+      },
+      {
+        "rank": 58,
+        "name": "St. Louis",
+        "state": "MO",
+        "population_2010": 319294,
+        "cbsa": "St. Louis, MO-IL",
+        "bbox": [
+          -91.42,
+          38.0,
+          -89.13,
+          39.53
+        ],
+        "bbox_source": "metro (CBSA-based)",
+        "merged_from": [],
+        "merged_from_population_2010": {}
+      },
+      {
+        "rank": 59,
+        "name": "Pittsburgh",
+        "state": "PA",
+        "population_2010": 305704,
+        "cbsa": "Pittsburgh, PA",
+        "bbox": [
+          -80.09,
+          40.36,
+          -79.86,
+          40.5
+        ],
+        "bbox_source": "user-supplied city-only rectangle"
+      }
+    ]
   }
 }

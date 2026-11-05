@@ -29,8 +29,10 @@ import source_cache as c
 class Rules(unittest.TestCase):
     def test_plans(self):
         self.assertEqual(p.plan("seattle", "ignored")["include"][0]["region"], "washington")
-        self.assertEqual(len(p.plan("new-york", "ignored")["include"]), 2)
-        self.assertEqual(len(p.plan("all-benchmarks", "ignored")["include"]), 5)
+        # New York and Miami are split into 2x2 tiles; every tile is one build job.
+        self.assertEqual(len(p.plan("new-york", "ignored")["include"]), 8)
+        self.assertEqual(len(p.plan("miami", "ignored")["include"]), 4)
+        self.assertEqual(len(p.plan("all-benchmarks", "ignored")["include"]), 14)
         self.assertEqual(len(p.plan("full-regions", "all")["include"]), 51)
         self.assertEqual(len(p.plan("full-regions", "washington,california")["include"]), 2)
         for bad in ("", "washington,washington", "../../escape", "x;echo bad"):
@@ -81,7 +83,10 @@ class Rules(unittest.TestCase):
                     self.assertFalse(p.supported({key: value, "name": "Bakery Cafe Restaurant"}))
         self.assertFalse(p.supported({"name": "Bakery"}))
         self.assertTrue(p.supported({"tourism": "hotel", "amenity": "restaurant"}))
-        self.assertTrue(p.supported({"amenity": "fuel", "shop": "convenience"}))
+        # Gas stations are not food venues, even when they carry shop=convenience.
+        self.assertFalse(p.supported({"amenity": "fuel", "shop": "convenience"}))
+        self.assertFalse(p.supported({"amenity": "fuel"}))
+        self.assertTrue(p.supported({"shop": "convenience", "name": "Corner Store"}))
 
     def test_native_selectors_and_final_eligibility_have_identical_allowlists(self):
         self.assertEqual(len(p.SELECTORS), 2)
@@ -667,13 +672,13 @@ class Export(unittest.TestCase):
         self.assertEqual(set(records), {"node:1", "node:3", "node:5", "node:6", "way:1",
                                        "relation:700", "node:9000", "node:9001", "node:9002"})
         self.assertEqual(p.load(self.work / "geometry-report.json")["rejected_count"], 0)
-        self.assertEqual(p.load(self.work / "export-stats.json")["selection_profile"], "food-v1")
+        self.assertEqual(p.load(self.work / "export-stats.json")["selection_profile"], "food-v2")
         with sqlite3.connect(self.db) as db:
             aliases = {row[0] for row in db.execute("SELECT DISTINCT id FROM names")}
             self.assertEqual(aliases, set(records))
         self.index()
         manifest = p.load(self.output / "manifest.json")
-        self.assertEqual(manifest["selection"], {"profile": "food-v1", "amenity": list(p.AMENITIES), "shop": list(p.FOOD_SHOPS)})
+        self.assertEqual(manifest["selection"], {"profile": "food-v2", "amenity": list(p.AMENITIES), "shop": list(p.FOOD_SHOPS)})
         self.assertEqual(p.verify(self.output)["features"], 9)
 
     def test_old_broad_sqlite_cannot_be_relabeled_as_food_only(self):
@@ -967,6 +972,189 @@ class BoundsAndMetrics(unittest.TestCase):
             self.assertEqual(set(p.load(Path(folder) / "summary.json")["stages"]), {"ok", "bad", "timeout"})
 
 
+class TilesAndMerge(unittest.TestCase):
+    """Tile planning, gas-station exclusion and typed-ID merge of regional/tile exports."""
+
+    BOX = (-122.46, 47.48, -122.20, 47.75)
+    FULL_IDS = {"node:1", "node:3", "node:5", "way:1", "relation:700"}
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.work = Path(self.temp.name)
+
+    def make_input(self, name, bbox=None, source=None):
+        directory = self.work / name
+        directory.mkdir()
+        p.export_records(source or ROOT / "tests/fixtures/places.osm", directory / "records.sqlite", bbox,
+                         as_of=dt.date(2026, 11, 5))
+        p.save(directory / "source.json", {"region": "fixture", "sha256": "fixture", "checksum_verified": True})
+        p.save(directory / "pbf-header.json", {"fixture": True})
+        return directory
+
+    def rows(self, dbpath):
+        with sqlite3.connect(dbpath) as db:
+            return {row[0]: row[1] for row in db.execute("SELECT id,data FROM features")}
+
+    def test_tiles_share_edges_and_cover_the_box(self):
+        boxes = dict(p.tile_boxes([-74.5, 40.35, -73.35, 41.35], 2, 2))
+        self.assertEqual(sorted(boxes), [0, 1, 2, 3])
+        self.assertEqual(boxes[0], [-74.5, 40.35, -73.925, 40.85])
+        self.assertEqual(boxes[3], [-73.925, 40.85, -73.35, 41.35])
+        # Neighbouring tiles share exact edges; the inclusive filter then emits
+        # boundary objects twice, which the merge removes by typed ID.
+        self.assertEqual(boxes[0][2], boxes[2][0])
+        self.assertEqual(boxes[0][3], boxes[1][1])
+
+    def test_plan_tile_jobs_share_a_group_and_have_unique_keys(self):
+        jobs = p.plan("new-york", "ignored")["include"]
+        self.assertEqual({job["group"] for job in jobs}, {"new-york"})
+        self.assertEqual(len({job["key"] for job in jobs}), 8)
+        self.assertEqual({job["region"] for job in jobs}, {"new-york", "new-jersey"})
+        self.assertEqual({job["bbox"].split(",")[0] for job in jobs}, {"-74.5", "-73.925"})
+        seattle = p.plan("seattle", "ignored")["include"]
+        self.assertEqual([job["group"] for job in seattle], ["seattle"])
+        full = p.plan("full-regions", "washington,california")["include"]
+        self.assertEqual([job["group"] for job in full], ["washington-full", "california-full"])
+
+    def test_gas_station_is_removed_but_a_separate_shop_survives(self):
+        import xml.etree.ElementTree as ET
+        tree = ET.parse(ROOT / "tests/fixtures/places.osm")
+        osm = tree.getroot()
+        for ident, tags in ((9100, {"amenity": "fuel", "shop": "convenience"}), (9101, {"amenity": "fuel"}),
+                            (9102, {"shop": "convenience"})):
+            node = ET.SubElement(osm, "node", id=str(ident), version="1", lon="-122.35", lat="47.61")
+            for key, value in {"name": "Synthetic " + str(ident), **tags}.items():
+                ET.SubElement(node, "tag", k=key, v=value)
+        source = self.work / "gas.osm"
+        tree.write(source, encoding="utf-8", xml_declaration=True)
+        dbpath = self.work / "gas.sqlite"
+        p.export_records(source, dbpath, self.BOX, as_of=dt.date(2026, 11, 5))
+        records = self.rows(dbpath)
+        self.assertNotIn("node:9100", records)
+        self.assertNotIn("node:9101", records)
+        self.assertIn("node:9102", records)
+
+    def test_fuel_station_cannot_be_smuggled_into_an_old_database(self):
+        dbpath = self.work / "old.sqlite"
+        p.export_records(ROOT / "tests/fixtures/places.osm", dbpath, self.BOX, as_of=dt.date(2026, 11, 5))
+        record = {"id": "node:9100", "name": "Gas", "osm_version": 1, "point": [-122.35, 47.61],
+                  "tags": {"amenity": "fuel", "shop": "convenience"}, "geometry": "node",
+                  "verification": "source_tags_only"}
+        with sqlite3.connect(dbpath) as db:
+            db.execute("INSERT INTO features VALUES (?,?,?,?,NULL)",
+                       ("node:9100", "12/0/0", "8/0/0", p.encoded(record).decode()))
+        p.save(self.work / "source.json", {"sha256": "fixture"})
+        p.save(self.work / "header.json", {"fixture": True})
+        with self.assertRaisesRegex(ValueError, "Non-food record"):
+            p.build_indexes(dbpath, self.work / "out", self.work / "source.json", self.work / "header.json", "unit-test")
+
+    def test_overlapping_tiles_merge_to_the_whole_box_export(self):
+        whole = self.make_input("whole", self.BOX)
+        left = self.make_input("left", (-122.46, 47.48, -122.35, 47.75))
+        right = self.make_input("right", (-122.35, 47.48, -122.20, 47.75))
+        # Both tiles contain every object at lon=-122.35; the duplicate must collapse.
+        self.assertTrue({"node:1", "node:3", "node:5"} <= set(self.rows(left / "records.sqlite")))
+        self.assertTrue({"node:1", "node:3", "node:5"} <= set(self.rows(right / "records.sqlite")))
+        merged = self.work / "merged"
+        result = p.merge_records([right, left], merged)
+        self.assertEqual(result, {"features": 5, "rejected": 0})
+        self.assertEqual(self.rows(merged / "records.sqlite"), self.rows(whole / "records.sqlite"))
+        stats = p.load(merged / "export-stats.json")
+        self.assertEqual(stats["selection_counts"], {"amenity=cafe": 1, "amenity=restaurant": 3, "shop=supermarket": 1})
+        self.assertEqual(len(stats["merged_inputs"]), 2)
+
+    def test_newest_osm_version_wins_and_order_does_not_matter(self):
+        old = self.make_input("old", self.BOX)
+        new = self.make_input("new", self.BOX)
+        with sqlite3.connect(new / "records.sqlite") as db:
+            record = json.loads(db.execute("SELECT data FROM features WHERE id='node:1'").fetchone()[0])
+            record["osm_version"], record["name"] = 9, "Edited Name"
+            db.execute("UPDATE features SET data=? WHERE id='node:1'", (p.encoded(record).decode(),))
+        for order in ([old, new], [new, old]):
+            merged = self.work / ("merged-" + "-".join(d.name for d in order))
+            p.merge_records(order, merged)
+            with sqlite3.connect(merged / "records.sqlite") as db:
+                row = json.loads(db.execute("SELECT data FROM features WHERE id='node:1'").fetchone()[0])
+                self.assertEqual((row["osm_version"], row["name"]), (9, "Edited Name"))
+                self.assertEqual(db.execute("SELECT count(*) FROM features").fetchone()[0], 5)
+
+    def test_quarantine_in_any_input_removes_the_feature_and_blocks_release(self):
+        whole = self.make_input("whole", self.BOX)
+        quarantined = self.make_input("quarantined", self.BOX)
+        with sqlite3.connect(quarantined / "records.sqlite") as db:
+            db.execute("DELETE FROM features WHERE id='way:1'")
+            db.execute("INSERT INTO geometry_rejections VALUES (?,?)", ("way:1", p.encoded(
+                {"id": "way:1", "name": "Concave Test", "reason": "invalid_polygon_geometry", "message": "synthetic"}).decode()))
+        report = p.load(quarantined / "geometry-report.json")
+        report.update(rejected_count=1, rejected_features=[{"id": "way:1", "name": "Concave Test", "reason": "invalid_polygon_geometry", "message": "synthetic"}], geometry_quality="quarantined")
+        p.save(quarantined / "geometry-report.json", report)
+        stats = p.load(quarantined / "export-stats.json")
+        stats.update(geometry_rejected_count=1, geometry_quality="quarantined")
+        p.save(quarantined / "export-stats.json", stats)
+        merged = self.work / "merged"
+        self.assertEqual(p.merge_records([whole, quarantined], merged), {"features": 4, "rejected": 1})
+        self.assertNotIn("way:1", self.rows(merged / "records.sqlite"))
+        self.assertEqual(p.load(merged / "geometry-report.json")["geometry_quality"], "quarantined")
+        output = self.work / "output"
+        p.build_indexes(merged / "records.sqlite", output, merged / "source.json", merged / "pbf-header.json", "unit-test")
+        self.assertEqual(p.verify(output)["geometry_rejected_count"], 1)
+        with self.assertRaisesRegex(ValueError, "quarantined"):
+            p.require_complete_geometry(output)
+
+    def test_merged_bundle_verifies_and_matches_the_single_box_bundle(self):
+        whole = self.make_input("whole", self.BOX)
+        left = self.make_input("left", (-122.46, 47.48, -122.35, 47.75))
+        right = self.make_input("right", (-122.35, 47.48, -122.20, 47.75))
+        merged = self.work / "merged"
+        p.merge_records([left, right], merged)
+        output = self.work / "output"
+        p.build_indexes(merged / "records.sqlite", output, merged / "source.json", merged / "pbf-header.json", "benchmark")
+        stats = p.verify(output)
+        self.assertEqual(stats["features"], 5)
+        self.assertEqual(stats["geometry_rejected_count"], 0)
+        reference = self.work / "reference"
+        p.build_indexes(whole / "records.sqlite", reference, whole / "source.json", whole / "pbf-header.json", "benchmark")
+        self.assertEqual(p.verify(reference)["features"], 5)
+        self.assertEqual(p.load(output / "manifest.json")["feature_count"], p.load(reference / "manifest.json")["feature_count"])
+
+    def test_merge_refuses_mixed_closure_dates_profiles_and_failed_inputs(self):
+        first = self.make_input("first", self.BOX)
+        other_day = self.make_input("other-day", self.BOX)
+        stats = p.load(other_day / "export-stats.json")
+        stats["closure_as_of"] = "2026-11-06"
+        p.save(other_day / "export-stats.json", stats)
+        with self.assertRaisesRegex(ValueError, "closure dates"):
+            p.merge_records([first, other_day], self.work / "m1")
+        old_profile = self.make_input("old-profile", self.BOX)
+        stats = p.load(old_profile / "export-stats.json")
+        stats["selection_profile"] = "food-v1"
+        p.save(old_profile / "export-stats.json", stats)
+        with self.assertRaisesRegex(ValueError, "current-profile"):
+            p.merge_records([first, old_profile], self.work / "m2")
+        failed = self.make_input("failed", self.BOX)
+        stats = p.load(failed / "export-stats.json")
+        stats["export_status"] = "failed"
+        p.save(failed / "export-stats.json", stats)
+        with self.assertRaisesRegex(ValueError, "current-profile"):
+            p.merge_records([first, failed], self.work / "m3")
+        with self.assertRaisesRegex(ValueError, "distinct"):
+            p.merge_records([first, first], self.work / "m4")
+
+    def test_workflow_tile_jobs_use_one_checkpoint_and_one_closure_date(self):
+        import yaml
+        workflow = yaml.load((ROOT / ".github/workflows/benchmark.yml").read_text(), Loader=yaml.BaseLoader)
+        jobs = workflow["jobs"]
+        self.assertEqual(jobs["build"]["needs"], ["plan", "source"])
+        self.assertEqual(jobs["merge"]["needs"], ["plan", "build"])
+        self.assertEqual(jobs["publish"]["needs"], ["plan", "merge"])
+        self.assertIn("--as-of", " ".join(step.get("run", "") for step in jobs["build"]["steps"]))
+        build_uses = [step.get("uses", "") for step in jobs["build"]["steps"]]
+        self.assertFalse(any("actions/cache/save" in use for use in build_uses))
+        self.assertTrue(any("actions/cache/restore" in use for use in build_uses))
+        self.assertIn("records-${{ matrix.group }}--*", str(jobs["merge"]["steps"]))
+        self.assertIn("as_of", jobs["plan"]["outputs"])
+
 class Workflow(unittest.TestCase):
     def test_workflow_boundaries_and_opt_ins(self):
         import yaml
@@ -989,7 +1177,9 @@ class Workflow(unittest.TestCase):
         self.assertIn("--quarantine-invalid-geometry", path.read_text())
         self.assertIn("require-complete-geometry --output output", path.read_text())
         self.assertIn("work/geometry-report.json", path.read_text())
-        self.assertLess(path.read_text().index("require-complete-geometry --output output"), path.read_text().index("gh release upload"))
+        text = path.read_text()
+        self.assertLess(text.index("require-complete-geometry --output output"),
+                        text.index('gh release upload "$TAG" "artifacts/${GROUP}.tar.gz"'))
         self.assertIn("work/relation-audit.json", path.read_text())
         self.assertIn("--draft=false", workflow["jobs"]["publish"]["steps"][0]["run"])
 

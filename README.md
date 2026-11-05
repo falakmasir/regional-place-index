@@ -19,13 +19,15 @@ crawler, chain blacklist, live Overpass queries, or database ingestion hooks.
    saves it before downstream work, then continues. `allow_full_download` is
    checked by default; uncheck it only when you want to prohibit cold downloads.
 4. Review the per-stage job summary and download `measurements-washington-seattle`.
-   A successful small build also produces a one-day `dataset-washington-seattle`
-   review artifact. The `.tar.gz.json` file reports feature/object counts, stored
+   A successful small build also produces a one-day `dataset-seattle` review
+   artifact (one bundle per benchmark, named after the benchmark). The `.tar.gz.json` file reports feature/object counts, stored
    bytes, archive bytes and SHA-256. Record cold/warm runner conditions accurately:
    `cache-state.json` records reuse/update/full-download and persistence results.
 5. Test **los-angeles**, **new-york** and **miami**, then **all-benchmarks**. New York
-   runs both NY and NJ sources; overlapping OSM IDs are stable and must be deduped
-   when joining regional outputs. These are explicit stress-test rectangles, not
+   runs both NY and NJ sources, and New York and Miami are each split into a 2×2
+   grid of tiles (one build job per tile). Objects repeated across the NY/NJ
+   extracts or on tile edges are deduplicated by typed OSM ID in the merge job
+   (`node:`, `way:`, `relation:`). These are explicit stress-test rectangles, not
    authoritative municipal/metro boundaries or application area selections.
 6. For a whole-state test choose **full-regions** and enter `washington,california`.
    `all` selects the 50 states plus DC, **not US territories**. Do this only after
@@ -174,7 +176,7 @@ use the export command's `--as-of YYYY-MM-DD` when reproducing a past build.
 The allowlists in `scripts/pipeline.py` apply **both at native tag filtering and
 before geometry/alias generation**, not just to the search UI. The index builder
 also rejects an old SQLite input containing non-food records rather than labeling
-it as food-only. New manifests record `selection.profile=food-v1` and both lists.
+it as food-only. New manifests record `selection.profile=food-v2` and both lists.
 
 - Food/drink venues: restaurant, fast food, cafe, bar, pub, food court, ice cream,
   marketplace (a market can contain food stalls; this is not proof of food stock).
@@ -184,8 +186,8 @@ it as food-only. New manifests record `selection.profile=food-v1` and both lists
 - No blanket `shop=*` or `tourism=*`. Banks, schools, hospitals, pharmacies,
   clothing shops, parks, campsites, hotels and transport POIs do not qualify on
   their own. A separately tagged cafe/restaurant inside a school, hotel or station
-  can qualify; the parent place is not automatically included. A gas station must
-  carry an explicit qualifying food/shop tag, rather than qualify as fuel alone.
+  can qualify; the parent place is not automatically included. Gas stations
+  (`amenity=fuel`) are excluded even when they also carry `shop=convenience`.
 - Names that merely contain food-related words are not evidence of eligibility.
   Chains remain eligible. Existing explicit closure/lifecycle/end-date exclusions
   and name/geometry requirements still apply. Eligibility is not proof of current
@@ -240,8 +242,33 @@ No BBBike source code was copied into this exporter.
 A consumer must validate manifest/page hashes, schema, size limits, record locators,
 source trust and archive paths before use. Cross-region deduplication/promotion,
 last-good per-region composition, serving routes and client query UI are **not**
-implemented here. Immutable page hashes enable measuring changed-object churn;
+implemented here. Deduplication is implemented only inside one benchmark group (the
+merge job above); last-good composition across separate runs is not. Immutable page hashes enable measuring changed-object churn;
 this benchmark does not upload pages into any application storage.
+
+## Jobs: source, tiles, merge
+
+The workflow has four stages, so a benchmark is built from one verified regional
+checkpoint per region:
+
+1. **source** (one job per region): restores, downloads or seeds the complete
+   regional PBF once and saves it to the cache. Nothing else writes that cache.
+2. **build** (one job per tile): restores the checkpoint, natively filters food
+   tags, resolves geometry only inside its own box and hands its SQLite records to
+   the merge job. A tile never downloads or re-saves a source.
+3. **merge** (one job per benchmark, or per region for full-regions): joins the
+   tile records of that benchmark by typed OSM ID. For a repeated object the newest
+   `osm_version` wins. An ID quarantined by any input is removed, so the merged
+   output never contains a feature whose geometry failed. It then builds the
+   indexes, verifies them, and packages one bundle.
+4. **publish**: only after every merge job succeeds, and only with release
+   publication enabled.
+
+All jobs of one run share one closure date, fixed in the plan job, so tiles that
+cross UTC midnight still merge. `merge-measurements-<group>` and the per-tile
+`measurements-<key>` artifacts record the timings; `export-stats.json` for a merged
+bundle lists each input and the food-tag counts (`selection_counts`) of the final
+features, which is the place to audit which tags actually contribute records.
 
 ## Measurements and failure behavior
 
