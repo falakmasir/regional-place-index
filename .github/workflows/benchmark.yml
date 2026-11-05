@@ -259,6 +259,9 @@ jobs:
     # One job per tile (or per region for full-regions). Filters the shared
     # checkpoint, exports only its box, and hands the SQLite records to merge.
     needs: [plan, source]
+    # Explicit condition: the implicit success() check also looks at prepare-release,
+    # which is skipped on ordinary runs, and skipped the whole chain in run 42033570977.
+    if: ${{ !cancelled() && needs.plan.result == 'success' && needs.source.result == 'success' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 300
     strategy:
@@ -368,6 +371,7 @@ jobs:
     # Joins every tile/region of one benchmark by typed OSM id, then builds,
     # verifies and packages exactly one bundle for that benchmark.
     needs: [plan, build]
+    if: ${{ !cancelled() && needs.plan.result == 'success' && needs.build.result == 'success' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 120
     strategy:

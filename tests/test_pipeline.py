@@ -1147,6 +1147,9 @@ class TilesAndMerge(unittest.TestCase):
         jobs = workflow["jobs"]
         self.assertEqual(jobs["build"]["needs"], ["plan", "source"])
         self.assertEqual(jobs["merge"]["needs"], ["plan", "build"])
+        # Ordinary runs skip prepare-release; build and merge must not inherit that skip.
+        self.assertIn("needs.source.result == 'success'", jobs["build"]["if"])
+        self.assertIn("needs.build.result == 'success'", jobs["merge"]["if"])
         self.assertEqual(jobs["publish"]["needs"], ["plan", "merge"])
         self.assertIn("--as-of", " ".join(step.get("run", "") for step in jobs["build"]["steps"]))
         build_uses = [step.get("uses", "") for step in jobs["build"]["steps"]]
