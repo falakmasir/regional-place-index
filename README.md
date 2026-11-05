@@ -253,16 +253,19 @@ checkpoint per region:
 
 1. **source** (one job per region): restores, downloads or seeds the complete
    regional PBF once and saves it to the cache. Nothing else writes that cache.
-2. **build** (one job per tile): restores the checkpoint, natively filters food
-   tags, resolves geometry only inside its own box and hands its SQLite records to
-   the merge job. A tile never downloads or re-saves a source.
+2. **build** (one job per tile): first checks that its own region's source job
+   succeeded, then restores the checkpoint, natively filters food tags, resolves
+   geometry only inside its own box and hands its SQLite records to the merge job.
+   A tile never downloads or re-saves a source. A failed region fails only its own
+   tiles; other regions still build.
 3. **merge** (one job per benchmark, or per region for full-regions): joins the
-   tile records of that benchmark by typed OSM ID. For a repeated object the newest
+   tile records of that benchmark by typed OSM ID. It refuses to run if any tile of
+   its group is missing, so a partial benchmark is never packaged. For a repeated object the newest
    `osm_version` wins. An ID quarantined by any input is removed, so the merged
    output never contains a feature whose geometry failed. It then builds the
    indexes, verifies them, and packages one bundle.
-4. **publish**: only after every merge job succeeds, and only with release
-   publication enabled.
+4. **publish**: only with release publication enabled, and only when the draft
+   release holds exactly the expected asset inventory. A partial run cannot publish.
 
 All jobs of one run share one closure date, fixed in the plan job, so tiles that
 cross UTC midnight still merge. `merge-measurements-<group>` and the per-tile

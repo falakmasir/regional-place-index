@@ -1172,8 +1172,16 @@ class TilesAndMerge(unittest.TestCase):
         self.assertEqual(jobs["build"]["needs"], ["plan", "source"])
         self.assertEqual(jobs["merge"]["needs"], ["plan", "build"])
         # Ordinary runs skip prepare-release; build and merge must not inherit that skip.
-        self.assertIn("needs.source.result == 'success'", jobs["build"]["if"])
-        self.assertIn("needs.build.result == 'success'", jobs["merge"]["if"])
+        # A failed region must not block other regions: build gates on its own source job,
+        # and merge refuses partial groups by counting handed-off tiles.
+        self.assertNotIn("needs.source.result", jobs["build"]["if"])
+        self.assertNotIn("needs.build.result", jobs["merge"]["if"])
+        self.assertIn("needs.plan.result == 'success'", jobs["build"]["if"])
+        self.assertIn("needs.plan.result == 'success'", jobs["merge"]["if"])
+        gate = next(step for step in jobs["build"]["steps"] if step.get("name", "").startswith("Require this region's source"))
+        self.assertIn('source (${REGION})', gate["run"])
+        self.assertIn("refusing a partial merge", " ".join(step.get("run", "") for step in jobs["merge"]["steps"]))
+        self.assertIn("MATRIX", jobs["merge"]["env"])
         self.assertEqual(jobs["publish"]["needs"], ["plan", "merge"])
         self.assertIn("--as-of", " ".join(step.get("run", "") for step in jobs["build"]["steps"]))
         build_uses = [step.get("uses", "") for step in jobs["build"]["steps"]]
@@ -1181,6 +1189,12 @@ class TilesAndMerge(unittest.TestCase):
         self.assertTrue(any("actions/cache/restore" in use for use in build_uses))
         self.assertIn("records-${{ matrix.group }}--*", str(jobs["merge"]["steps"]))
         self.assertIn("as_of", jobs["plan"]["outputs"])
+        # Network installs are bounded and retried, so one stalled mirror cannot eat the job.
+        for name in ("source", "build"):
+            install = next(step for step in jobs[name]["steps"] if step.get("name", "").startswith("Install native"))
+            self.assertIn("retry sudo apt-get update", install["run"])
+            self.assertIn("timeout 10m", install["run"])
+            self.assertGreaterEqual(int(install["timeout-minutes"]), 30)
 
 class Workflow(unittest.TestCase):
     def test_workflow_boundaries_and_opt_ins(self):

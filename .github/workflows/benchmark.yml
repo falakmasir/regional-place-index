@@ -182,11 +182,22 @@ jobs:
             exit 1
           fi
       - name: Install native filter and pinned geometry tools
-        timeout-minutes: 15
+        # Each network step is bounded and retried, so one stalled mirror
+        # cannot consume the whole job (run 42066638065 hit a 15-minute stall).
+        timeout-minutes: 30
         run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y --no-install-recommends osmium-tool curl
-          python -m pip install -r requirements.txt
+          retry() {
+            local attempt
+            for attempt in 1 2 3; do
+              if timeout 10m "$@"; then return 0; fi
+              echo "::warning::Attempt ${attempt} failed: $*"
+              sleep 20
+            done
+            return 1
+          }
+          retry sudo apt-get update -qq
+          retry sudo apt-get install -y --no-install-recommends osmium-tool curl
+          retry python -m pip install -r requirements.txt
           mkdir -p work artifacts
           osmium --version > work/tool-versions.txt
           python -m pip freeze >> work/tool-versions.txt
@@ -258,10 +269,12 @@ jobs:
   build:
     # One job per tile (or per region for full-regions). Filters the shared
     # checkpoint, exports only its box, and hands the SQLite records to merge.
+    # A failed region must not block other regions: each build checks only its
+    # own source job (below); the other regions' builds still run.
     needs: [plan, source]
     # Explicit condition: the implicit success() check also looks at prepare-release,
     # which is skipped on ordinary runs, and skipped the whole chain in run 42033570977.
-    if: ${{ !cancelled() && needs.plan.result == 'success' && needs.source.result == 'success' }}
+    if: ${{ !cancelled() && needs.plan.result == 'success' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 300
     strategy:
@@ -280,6 +293,13 @@ jobs:
       GH_TOKEN: ${{ github.token }}
       GH_REPO: ${{ github.repository }}
     steps:
+      - name: Require this region's source job to have succeeded
+        run: |
+          conclusion=$(gh api --paginate "repos/${GH_REPO}/actions/runs/${GITHUB_RUN_ID}/jobs?filter=latest" --jq ".jobs[] | select(.name == \"source (${REGION})\") | .conclusion")
+          if [[ "$conclusion" != "success" ]]; then
+            echo "::error::Source job for ${REGION} concluded '${conclusion:-unknown}'; no tiles are built for it"
+            exit 1
+          fi
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
@@ -304,11 +324,22 @@ jobs:
             exit 1
           fi
       - name: Install native filter and pinned geometry tools
-        timeout-minutes: 15
+        # Each network step is bounded and retried, so one stalled mirror
+        # cannot consume the whole job (run 42066638065 hit a 15-minute stall).
+        timeout-minutes: 30
         run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y --no-install-recommends osmium-tool curl
-          python -m pip install -r requirements.txt
+          retry() {
+            local attempt
+            for attempt in 1 2 3; do
+              if timeout 10m "$@"; then return 0; fi
+              echo "::warning::Attempt ${attempt} failed: $*"
+              sleep 20
+            done
+            return 1
+          }
+          retry sudo apt-get update -qq
+          retry sudo apt-get install -y --no-install-recommends osmium-tool curl
+          retry python -m pip install -r requirements.txt
           mkdir -p work artifacts
           osmium --version > work/tool-versions.txt
           python -m pip freeze >> work/tool-versions.txt
@@ -370,8 +401,10 @@ jobs:
   merge:
     # Joins every tile/region of one benchmark by typed OSM id, then builds,
     # verifies and packages exactly one bundle for that benchmark.
+    # Runs even when some tiles failed, so a complete group still merges. A group
+    # with any missing tile refuses to merge (checked in the merge step).
     needs: [plan, build]
-    if: ${{ !cancelled() && needs.plan.result == 'success' && needs.build.result == 'success' }}
+    if: ${{ !cancelled() && needs.plan.result == 'success' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 120
     strategy:
@@ -386,6 +419,7 @@ jobs:
       SCOPE: ${{ matrix.scope }}
       PYTHONUNBUFFERED: '1'
       LIMIT: ${{ needs.plan.outputs.artifact_limit }}
+      MATRIX: ${{ needs.plan.outputs.matrix }}
       TAG: ${{ needs.plan.outputs.tag }}
       GH_TOKEN: ${{ github.token }}
       GH_REPO: ${{ github.repository }}
@@ -406,7 +440,11 @@ jobs:
         run: |
           mkdir -p work artifacts output
           mapfile -t inputs < <(find handoff -mindepth 1 -maxdepth 1 -type d | sort)
-          if [[ "${#inputs[@]}" -lt 1 ]]; then echo '::error::No tile inputs were handed off'; exit 1; fi
+          expected=$(jq --arg g "$GROUP" '[.include[] | select(.group == $g)] | length' <<< "$MATRIX")
+          if [[ "${#inputs[@]}" -ne "$expected" ]]; then
+            echo "::error::Expected ${expected} tile inputs for ${GROUP}, found ${#inputs[@]}; refusing a partial merge"
+            exit 1
+          fi
           python scripts/pipeline.py measure --stage merge --metrics work/metrics.json --seconds 1800 -- \
             python scripts/pipeline.py merge --inputs "${inputs[@]}" --output work/merged
           python scripts/pipeline.py measure --stage indexes --metrics work/metrics.json --seconds 2700 -- \
